@@ -5,6 +5,8 @@
 //! recognises multi-line block constructs (`code:` blocks, `table:`, etc.). The
 //! resulting AST is then walked here to emit Markdown.
 
+use std::fmt::Write as _;
+
 use cosy::ast::{Block, BlockContent, CodeBlockMeta, Link, Node, ShellPrompt};
 
 pub fn render(project: &str, lines: &[String]) -> String {
@@ -53,19 +55,12 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
         }
         BlockContent::CodeBlock { meta, content } => {
             let lang = match meta {
-                CodeBlockMeta::None => String::new(),
-                CodeBlockMeta::NameOrLang(s) => infer_lang(s).to_string(),
-                CodeBlockMeta::Both { language, .. } => language.clone(),
-                _ => String::new(),
+                CodeBlockMeta::NameOrLang(s) => infer_lang(s),
+                CodeBlockMeta::Both { language, .. } => language.as_str(),
+                _ => "",
             };
-            out.push_str("```");
-            out.push_str(&lang);
-            out.push('\n');
-            out.push_str(content);
-            if !content.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str("```");
+            let trailing = if content.ends_with('\n') { "" } else { "\n" };
+            write!(out, "```{lang}\n{content}{trailing}```").unwrap();
         }
         BlockContent::Table { name, rows } => {
             render_table(name, rows, project, out);
@@ -74,21 +69,13 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
             out.push_str("> ");
             render_nodes(nodes, project, out);
         }
-        BlockContent::Helpfeel(s) => {
-            out.push_str("> ? ");
-            out.push_str(s);
-        }
+        BlockContent::Helpfeel(s) => write!(out, "> ? {s}").unwrap(),
         BlockContent::CommandLine { prompt, command } => {
             let p = match prompt {
-                ShellPrompt::Dollar => "$",
-                ShellPrompt::Percent => "%",
-                _ => "$",
+                ShellPrompt::Percent => '%',
+                _ => '$',
             };
-            out.push_str("```sh\n");
-            out.push_str(p);
-            out.push(' ');
-            out.push_str(command);
-            out.push_str("\n```");
+            write!(out, "```sh\n{p} {command}\n```").unwrap();
         }
         BlockContent::Custom(_) => {}
         _ => {}
@@ -119,39 +106,16 @@ fn render_node(node: &Node<()>, project: &str, out: &mut String) {
     match node {
         Node::Text(s) => out.push_str(s),
         Node::Link(l) => render_link(l, project, out),
-        Node::Image(url) => {
-            out.push_str("![](");
-            out.push_str(url.as_str());
-            out.push(')');
-        }
-        Node::LinkedImage { src, href } => {
-            out.push_str("[![](");
-            out.push_str(src.as_str());
-            out.push_str(")](");
-            out.push_str(href.as_str());
-            out.push(')');
-        }
+        Node::Image(url) => write!(out, "![]({url})").unwrap(),
+        Node::LinkedImage { src, href } => write!(out, "[![]({src})]({href})").unwrap(),
         Node::Icon { name, count } => {
             for _ in 0..(*count).max(1) {
-                out.push(':');
-                out.push_str(name);
-                out.push(':');
+                write!(out, ":{name}:").unwrap();
             }
         }
-        Node::InlineCode(s) => {
-            out.push('`');
-            out.push_str(s);
-            out.push('`');
-        }
-        Node::Math(s) => {
-            out.push('$');
-            out.push_str(s);
-            out.push('$');
-        }
-        Node::Hashtag(s) => {
-            out.push('#');
-            out.push_str(s);
-        }
+        Node::InlineCode(s) => write!(out, "`{s}`").unwrap(),
+        Node::Math(s) => write!(out, "${s}$").unwrap(),
+        Node::Hashtag(s) => write!(out, "#{s}").unwrap(),
         Node::Decoration { decos, nodes } => {
             let (open, close) = decoration_marks(decos);
             out.push_str(open);
@@ -168,7 +132,6 @@ fn render_node(node: &Node<()>, project: &str, out: &mut String) {
             longitude,
             zoom: _,
         } => {
-            // Render as plain text; geographic embeds aren't a Markdown primitive.
             use cosy::ast::{Latitude, Longitude};
             let (lat_dir, lat_v) = match latitude {
                 Latitude::North(v) => ('N', *v),
@@ -178,7 +141,7 @@ fn render_node(node: &Node<()>, project: &str, out: &mut String) {
                 Longitude::East(v) => ('E', *v),
                 Longitude::West(v) => ('W', *v),
             };
-            out.push_str(&format!("({lat_dir}{lat_v},{lon_dir}{lon_v})"));
+            write!(out, "({lat_dir}{lat_v},{lon_dir}{lon_v})").unwrap();
         }
         Node::Custom(_) => {}
         _ => {}
@@ -203,58 +166,38 @@ fn decoration_marks(decos: &str) -> (&'static str, &'static str) {
 fn render_link(link: &Link<()>, project: &str, out: &mut String) {
     match link {
         Link::Page(title) => {
-            out.push('[');
-            out.push_str(title);
-            out.push_str("](");
-            out.push_str(&page_url(project, title));
-            out.push(')');
+            write!(
+                out,
+                "[{title}](https://scrapbox.io/{}/{})",
+                urlencoding::encode(project),
+                urlencoding::encode(title),
+            )
+            .unwrap();
         }
-        Link::Url(url) => {
-            out.push('<');
-            out.push_str(url.as_str());
-            out.push('>');
-        }
+        Link::Url(url) => write!(out, "<{url}>").unwrap(),
         Link::WithLabel { href, label } => {
             out.push('[');
             render_nodes(label, project, out);
-            out.push_str("](");
-            out.push_str(href.as_str());
-            out.push(')');
+            write!(out, "]({href})").unwrap();
         }
         Link::Project(p) => {
-            out.push('[');
-            out.push_str(p);
-            out.push_str("](https://scrapbox.io/");
-            out.push_str(&urlencoding::encode(p));
-            out.push_str(")");
+            write!(out, "[{p}](https://scrapbox.io/{})", urlencoding::encode(p)).unwrap();
         }
         Link::ProjectPage { project: p, page } => {
-            out.push('[');
-            out.push_str(p);
-            out.push('/');
-            out.push_str(page);
-            out.push_str("](https://scrapbox.io/");
-            out.push_str(&urlencoding::encode(p));
-            out.push('/');
-            out.push_str(&urlencoding::encode(page));
-            out.push(')');
+            write!(
+                out,
+                "[{p}/{page}](https://scrapbox.io/{}/{})",
+                urlencoding::encode(p),
+                urlencoding::encode(page),
+            )
+            .unwrap();
         }
         _ => {}
     }
 }
 
-fn page_url(project: &str, title: &str) -> String {
-    format!(
-        "https://scrapbox.io/{}/{}",
-        urlencoding::encode(project),
-        urlencoding::encode(title)
-    )
-}
-
 fn render_table(name: &str, rows: &[Vec<Vec<Node<()>>>], project: &str, out: &mut String) {
-    out.push_str("**");
-    out.push_str(name);
-    out.push_str("**\n");
+    writeln!(out, "**{name}**").unwrap();
     if rows.is_empty() {
         return;
     }
@@ -262,18 +205,15 @@ fn render_table(name: &str, rows: &[Vec<Vec<Node<()>>>], project: &str, out: &mu
     if max_cols == 0 {
         return;
     }
-    // First row as header.
     write_row(&rows[0], max_cols, project, out);
     out.push('\n');
     out.push('|');
     for _ in 0..max_cols {
         out.push_str(" --- |");
     }
-    if rows.len() > 1 {
-        for row in &rows[1..] {
-            out.push('\n');
-            write_row(row, max_cols, project, out);
-        }
+    for row in rows.iter().skip(1) {
+        out.push('\n');
+        write_row(row, max_cols, project, out);
     }
 }
 
