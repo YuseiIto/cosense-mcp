@@ -1,9 +1,9 @@
 //! Convert a Cosense page (line-based text) into Markdown.
 //!
-//! Each line is parsed with `cosy::parse()` independently (Cosense's API returns
-//! lines as `{ text: String }`, and Cosy expects newline-separated full text but
-//! works fine line-by-line for inline rendering). Block-level constructs that
-//! span multiple lines (code blocks, tables) are detected at this layer.
+//! Cosense's API returns pages as a list of `{ text: String }` lines. We join the
+//! lines back into a single document and parse it once with `cosy::parse()`, which
+//! recognises multi-line block constructs (`code:` blocks, `table:`, etc.). The
+//! resulting AST is then walked here to emit Markdown.
 
 use cosy::ast::{Block, BlockContent, CodeBlockMeta, Link, Node, ShellPrompt};
 
@@ -294,5 +294,90 @@ fn infer_lang(name_or_lang: &str) -> &str {
         &name_or_lang[idx + 1..]
     } else {
         name_or_lang
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(input: &str) -> String {
+        let lines: Vec<String> = input.lines().map(str::to_owned).collect();
+        render("proj", &lines)
+    }
+
+    #[test]
+    fn plain_line_passes_through() {
+        assert_eq!(r("hello world"), "hello world\n");
+    }
+
+    #[test]
+    fn headings_use_size_decoration() {
+        assert_eq!(r("[* h1]"), "# h1\n");
+        assert_eq!(r("[** h2]"), "## h2\n");
+        assert_eq!(r("[*** h3]"), "### h3\n");
+    }
+
+    #[test]
+    fn page_link_renders_with_project_url() {
+        let out = r("see [Some Page] for details");
+        assert!(
+            out.contains("[Some Page](https://scrapbox.io/proj/Some%20Page)"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn url_with_label() {
+        let out = r("[https://example.com Example]");
+        assert!(out.contains("[Example](https://example.com"), "got: {out}");
+    }
+
+    #[test]
+    fn bare_url_in_brackets_renders_as_autolink() {
+        let out = r("[https://example.com]");
+        assert!(out.contains("<https://example.com"), "got: {out}");
+    }
+
+    #[test]
+    fn indented_lines_become_bullet_list() {
+        let out = r(" first\n  second");
+        assert!(out.contains("- first"), "got: {out}");
+        assert!(out.contains("  - second"), "got: {out}");
+    }
+
+    #[test]
+    fn code_block_with_filename_uses_extension_as_lang() {
+        let input = "code:main.rs\n fn main() {}\n";
+        let out = r(input);
+        assert!(out.contains("```rs"), "got: {out}");
+        assert!(out.contains("fn main()"), "got: {out}");
+        assert!(out.contains("```\n") || out.ends_with("```"), "got: {out}");
+    }
+
+    #[test]
+    fn strikethrough_decoration() {
+        let out = r("[- gone]");
+        assert!(out.contains("~~gone~~"), "got: {out}");
+    }
+
+    #[test]
+    fn bold_italic_combination() {
+        let out = r("[*/ emph]");
+        assert!(out.contains("***emph***"), "got: {out}");
+    }
+
+    #[test]
+    fn heading_detection_only_when_decoration_is_pure_stars() {
+        // [*- x] = bold + strike, NOT a heading
+        let out = r("[*- x]");
+        assert!(!out.starts_with("# "), "got: {out}");
+    }
+
+    #[test]
+    fn infer_lang_extracts_extension() {
+        assert_eq!(infer_lang("main.rs"), "rs");
+        assert_eq!(infer_lang("rust"), "rust");
+        assert_eq!(infer_lang("foo.tar.gz"), "gz");
     }
 }

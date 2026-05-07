@@ -99,7 +99,8 @@ pub struct SearchPagesArgs {
 #[derive(Debug, Serialize)]
 struct ListPagesResponse {
     project: String,
-    count: u32,
+    /// Total number of pages in the project (not the number returned in `pages`).
+    total_pages_in_project: u32,
     pages: Vec<ListPageItem>,
 }
 
@@ -123,7 +124,8 @@ struct GetPageResponse {
 #[derive(Debug, Serialize)]
 struct SearchPagesResponse {
     project: String,
-    count: u32,
+    /// Total number of matching pages (not the number returned in `hits`).
+    total_hits: u32,
     hits: Vec<SearchHitItem>,
 }
 
@@ -138,7 +140,7 @@ struct SearchHitItem {
 #[tool_router]
 impl CosenseServer {
     #[tool(
-        description = "List pages in a Cosense project. Defaults to the most recently updated pages — useful as an entry point for exploration. Returns title, the first description line, and update timestamp. Omit `project` to use the default project."
+        description = "List pages in a Cosense project. Defaults to the most recently updated pages — useful as an entry point for exploration. Returns title, the first description line, and update timestamp. `total_pages_in_project` is the project-wide count; the actual returned slice is `pages` (length up to `limit`). Omit `project` to use the default project."
     )]
     async fn list_pages(
         &self,
@@ -153,7 +155,7 @@ impl CosenseServer {
             .list_pages(&project, limit, args.skip, sort)
             .await
             .map(|list| ListPagesResponse {
-                count: list.count,
+                total_pages_in_project: list.count,
                 pages: list
                     .pages
                     .into_iter()
@@ -196,7 +198,7 @@ impl CosenseServer {
     }
 
     #[tool(
-        description = "Full-text search within a Cosense project. Returns hit titles and snippet lines. Use this when you need to find pages by content rather than browse by recent update. Omit `project` to use the default project."
+        description = "Full-text search within a Cosense project. Returns hit titles and snippet lines. `total_hits` is the project-wide match count; up to ~100 are returned in `hits` due to API limits. Use this when you need to find pages by content rather than browse by recent update. Omit `project` to use the default project."
     )]
     async fn search_pages(
         &self,
@@ -208,7 +210,7 @@ impl CosenseServer {
             .search_pages(&project, &args.query)
             .await
             .map(|result| SearchPagesResponse {
-                count: result.count,
+                total_hits: result.count,
                 hits: result
                     .pages
                     .into_iter()

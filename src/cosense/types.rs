@@ -1,13 +1,10 @@
 use serde::Deserialize;
 
 /// Subset of fields returned by `GET /pages/:project`.
+/// `count` is the **total number of pages in the project**, not the number returned in `pages`.
 #[derive(Debug, Deserialize)]
 pub struct PageList {
     pub count: u32,
-    #[serde(rename = "skip")]
-    pub _skip: Option<u32>,
-    #[serde(rename = "limit")]
-    pub _limit: Option<u32>,
     pub pages: Vec<PageSummary>,
 }
 
@@ -17,8 +14,6 @@ pub struct PageSummary {
     #[serde(default)]
     pub descriptions: Vec<String>,
     pub updated: i64,
-    #[serde(default)]
-    pub views: Option<u64>,
 }
 
 /// Subset of fields returned by `GET /pages/:project/:title`.
@@ -50,6 +45,7 @@ pub struct RelatedPage {
 }
 
 /// Subset of fields returned by `GET /pages/:project/search/query`.
+/// `count` is the **total number of matching pages**, not the number returned in `pages`.
 #[derive(Debug, Deserialize)]
 pub struct SearchResult {
     pub count: u32,
@@ -59,8 +55,6 @@ pub struct SearchResult {
 #[derive(Debug, Deserialize)]
 pub struct SearchHit {
     pub title: String,
-    #[serde(default)]
-    pub words: Vec<String>,
     #[serde(default)]
     pub lines: Vec<String>,
 }
