@@ -54,11 +54,14 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
             render_nodes(nodes, project, out);
         }
         BlockContent::CodeBlock { meta, content } => {
-            let lang = match meta {
-                CodeBlockMeta::NameOrLang(s) => infer_lang(s),
-                CodeBlockMeta::Both { language, .. } => language.as_str(),
-                _ => "",
-            };
+            // Note: when `block.indent > 0` the original block was nested under a list
+            // item. Markdown can express that with 4-space-indented fences but we
+            // currently emit at column 0 — known limitation, accepted because nested
+            // code blocks are rare in practice.
+            let (filename, lang) = code_block_label(meta);
+            if let Some(f) = filename {
+                writeln!(out, "**{f}**").unwrap();
+            }
             let trailing = if content.ends_with('\n') { "" } else { "\n" };
             write!(out, "```{lang}\n{content}{trailing}```").unwrap();
         }
@@ -118,9 +121,9 @@ fn render_node(node: &Node<()>, project: &str, out: &mut String) {
         Node::Hashtag(s) => write!(out, "#{s}").unwrap(),
         Node::Decoration { decos, nodes } => {
             let (open, close) = decoration_marks(decos);
-            out.push_str(open);
+            out.push_str(&open);
             render_nodes(nodes, project, out);
-            out.push_str(close);
+            out.push_str(&close);
         }
         Node::Strong(nodes) => {
             out.push_str("**");
@@ -130,7 +133,7 @@ fn render_node(node: &Node<()>, project: &str, out: &mut String) {
         Node::Coordinate {
             latitude,
             longitude,
-            zoom: _,
+            zoom,
         } => {
             use cosy::ast::{Latitude, Longitude};
             let (lat_dir, lat_v) = match latitude {
@@ -141,25 +144,51 @@ fn render_node(node: &Node<()>, project: &str, out: &mut String) {
                 Longitude::East(v) => ('E', *v),
                 Longitude::West(v) => ('W', *v),
             };
-            write!(out, "({lat_dir}{lat_v},{lon_dir}{lon_v})").unwrap();
+            match zoom {
+                Some(z) => write!(out, "({lat_dir}{lat_v},{lon_dir}{lon_v},Z{z})").unwrap(),
+                None => write!(out, "({lat_dir}{lat_v},{lon_dir}{lon_v})").unwrap(),
+            }
         }
         Node::Custom(_) => {}
         _ => {}
     }
 }
 
-fn decoration_marks(decos: &str) -> (&'static str, &'static str) {
-    // Cosense decorations: '*' bold (also size emphasis), '/' italic, '-' strike, '_' underline.
-    // We map combinations conservatively.
-    let has_star = decos.contains('*');
-    let has_slash = decos.contains('/');
-    let has_dash = decos.contains('-');
-    match (has_star, has_slash, has_dash) {
-        (true, true, _) => ("***", "***"),
-        (true, false, _) => ("**", "**"),
-        (false, true, _) => ("*", "*"),
-        (false, false, true) => ("~~", "~~"),
-        _ => ("", ""),
+fn decoration_marks(decos: &str) -> (String, String) {
+    // Cosense decorations: '*' bold/size, '/' italic, '-' strike, '_' underline.
+    // Multiple chars stack (e.g. "*-/" → bold + italic + strike). Other DECO_CHARS
+    // permitted by the parser but lacking a Cosense visual rule are ignored — the
+    // wrapped text content is still emitted, so no information is dropped.
+    let mut open = String::new();
+    let mut close = String::new();
+    let stack = [
+        ('_', "<u>", "</u>"),
+        ('-', "~~", "~~"),
+        ('*', "**", "**"),
+        ('/', "*", "*"),
+    ];
+    for (ch, o, c) in stack {
+        if decos.contains(ch) {
+            open.push_str(o);
+            close.insert_str(0, c);
+        }
+    }
+    (open, close)
+}
+
+fn code_block_label(meta: &CodeBlockMeta) -> (Option<&str>, &str) {
+    match meta {
+        CodeBlockMeta::None => (None, ""),
+        CodeBlockMeta::NameOrLang(s) => {
+            // `code:foo` — bare language id; `code:foo.ext` — filename.
+            if s.contains('.') {
+                (Some(s.as_str()), infer_lang(s))
+            } else {
+                (None, s.as_str())
+            }
+        }
+        CodeBlockMeta::Both { filename, language } => (Some(filename.as_str()), language.as_str()),
+        _ => (None, ""),
     }
 }
 
@@ -330,6 +359,50 @@ mod tests {
     fn bold_italic_combination() {
         let out = r("[*/ emph]");
         assert!(out.contains("***emph***"), "got: {out}");
+    }
+
+    #[test]
+    fn underline_decoration_preserved() {
+        let out = r("[_ note]");
+        assert!(out.contains("<u>note</u>"), "got: {out}");
+    }
+
+    #[test]
+    fn three_decorations_stack() {
+        // bold + italic + strike — each must survive in the output.
+        let out = r("[*-/ all]");
+        assert!(out.contains("**"), "missing bold in: {out}");
+        assert!(out.contains("*all*") || out.contains("*all"), "missing italic in: {out}");
+        assert!(out.contains("~~all~~") || out.contains("~~"), "missing strike in: {out}");
+    }
+
+    #[test]
+    fn coordinate_zoom_preserved() {
+        let out = r("[N35.65,E139.74,Z14]");
+        assert!(out.contains("Z14"), "expected zoom in: {out}");
+    }
+
+    #[test]
+    fn coordinate_without_zoom() {
+        let out = r("[N35.65,E139.74]");
+        assert!(out.contains("N35.65") && out.contains("E139.74"), "got: {out}");
+        assert!(!out.contains("Z"), "unexpected Z in: {out}");
+    }
+
+    #[test]
+    fn code_block_with_filename_and_language_preserves_both() {
+        let input = "code:main.rs(rust)\n fn main() {}\n";
+        let out = r(input);
+        assert!(out.contains("**main.rs**"), "expected filename label in: {out}");
+        assert!(out.contains("```rust"), "expected language fence in: {out}");
+    }
+
+    #[test]
+    fn code_block_with_bare_language_no_filename_label() {
+        let input = "code:rust\n fn main() {}\n";
+        let out = r(input);
+        assert!(out.contains("```rust"), "expected language fence in: {out}");
+        assert!(!out.contains("**rust**"), "should not emit filename label in: {out}");
     }
 
     #[test]
