@@ -350,9 +350,34 @@ mod tests {
     fn code_block_with_filename_uses_extension_as_lang() {
         let input = "code:main.rs\n fn main() {}\n";
         let out = r(input);
-        assert!(out.contains("```rs"), "got: {out}");
-        assert!(out.contains("fn main()"), "got: {out}");
-        assert!(out.contains("```\n") || out.ends_with("```"), "got: {out}");
+        assert!(out.contains("```rs"), "expected opening ```rs in: {out}");
+        assert!(out.contains("fn main()"), "expected body content in: {out}");
+        // Two fences expected: one opening (```rs) and one closing (```).
+        assert_eq!(out.matches("```").count(), 2, "expected exactly 2 fences in: {out}");
+    }
+
+    #[test]
+    fn code_block_without_metadata_emits_blank_lang() {
+        // `code:` with no filename/lang should still produce a fenced block.
+        let input = "code:\n some content\n";
+        let out = r(input);
+        assert!(out.contains("```\n") || out.contains("```"), "got: {out}");
+        assert_eq!(out.matches("```").count(), 2, "expected exactly 2 fences in: {out}");
+    }
+
+    #[test]
+    fn empty_input_produces_empty_output() {
+        assert_eq!(render("p", &[]), "");
+    }
+
+    #[test]
+    fn table_renders_with_pipe_syntax() {
+        // Cosense table: `table:Name` followed by space-indented, tab-separated rows.
+        let input = "table:Stats\n  header1\theader2\n  row1a\trow1b\n";
+        let out = r(input);
+        assert!(out.contains("**Stats**"), "expected table name as bold in: {out}");
+        assert!(out.contains("|"), "expected pipe syntax in: {out}");
+        assert!(out.contains("---"), "expected separator row in: {out}");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use url::Url;
+use url::{Host, Url};
 
 const DEFAULT_API_BASE: &str = "https://scrapbox.io/api";
 
@@ -89,10 +89,10 @@ fn validate_api_base(raw: Option<&str>, sid_set: bool) -> Result<String> {
         bail!("COSENSE_API_BASE must use http or https scheme, got '{scheme}'");
     }
     let host = url
-        .host_str()
+        .host()
         .ok_or_else(|| anyhow::anyhow!("COSENSE_API_BASE='{raw}' has no host"))?;
 
-    if sid_set && scheme == "http" && !is_loopback(host) {
+    if sid_set && scheme == "http" && !is_loopback(&host) {
         bail!(
             "refusing to send COSENSE_SID over plaintext HTTP to non-loopback host '{host}'. \
              Use https:// for production, or unset COSENSE_SID."
@@ -104,9 +104,13 @@ fn validate_api_base(raw: Option<&str>, sid_set: bool) -> Result<String> {
     Ok(normalized)
 }
 
-fn is_loopback(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
-        || host.starts_with("127.")
+fn is_loopback(host: &Host<&str>) -> bool {
+    match host {
+        // Some local DNS setups resolve "localhost" — accept it without a lookup.
+        Host::Domain(name) => *name == "localhost",
+        Host::Ipv4(addr) => addr.is_loopback(),
+        Host::Ipv6(addr) => addr.is_loopback(),
+    }
 }
 
 #[cfg(test)]
@@ -164,10 +168,22 @@ mod tests {
 
     #[test]
     fn sid_over_plaintext_http_to_loopback_allowed() {
-        for host in ["http://localhost:5000", "http://127.0.0.1:8080", "http://127.5.5.5"] {
+        for host in [
+            "http://localhost:5000",
+            "http://127.0.0.1:8080",
+            "http://127.5.5.5",
+            "http://[::1]:9000",
+        ] {
             let r = cfg(Some("x"), None, Some("abc"), Some(host));
             assert!(r.is_ok(), "expected loopback allowed for {host}: {r:?}");
         }
+    }
+
+    #[test]
+    fn sid_over_plaintext_http_to_lookalike_host_rejected() {
+        // "127.foo" matches the old `starts_with("127.")` heuristic but is not a real loopback.
+        let r = cfg(Some("x"), None, Some("abc"), Some("http://127.foo/api"));
+        assert!(r.is_err(), "expected rejection for 127.foo: {r:?}");
     }
 
     #[test]
