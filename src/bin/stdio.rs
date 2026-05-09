@@ -1,14 +1,9 @@
-mod config;
-mod cosense;
-mod mcp;
-
 use anyhow::Result;
+use cosense_mcp::config::Config;
+use cosense_mcp::cosense::{AuthMethod, CosenseClient};
+use cosense_mcp::mcp::CosenseServer;
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::{EnvFilter, fmt};
-
-use crate::config::Config;
-use crate::cosense::{AuthMethod, CosenseClient};
-use crate::mcp::CosenseServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {

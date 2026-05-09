@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::cosense::{CosenseClient, CosenseError, markdown};
 
+#[derive(Clone)]
 pub struct CosenseServer {
     client: Arc<CosenseClient>,
     config: Arc<Config>,

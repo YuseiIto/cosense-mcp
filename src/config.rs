@@ -3,6 +3,56 @@ use url::{Host, Url};
 
 const DEFAULT_API_BASE: &str = "https://scrapbox.io/api";
 
+/// Configuration for the HTTP (Lambda) transport. Read only by the lambda binary.
+#[derive(Debug, Clone)]
+pub struct HttpConfig {
+    /// Auth0 tenant domain, e.g. `yuseiito-mcp.us.auth0.com`.
+    pub auth0_domain: String,
+    /// Auth0 API identifier used as the JWT `aud` claim, e.g. `https://cosense-mcp.local/api`.
+    pub auth0_audience: String,
+    /// Public URL of this Lambda Function URL (no trailing slash), e.g.
+    /// `https://abc.lambda-url.ap-northeast-1.on.aws`.
+    pub resource_server_url: String,
+}
+
+impl HttpConfig {
+    pub fn from_env() -> Result<Self> {
+        let auth0_domain = std::env::var("AUTH0_DOMAIN")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("AUTH0_DOMAIN env var is required"))?;
+        let auth0_audience = std::env::var("AUTH0_AUDIENCE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("AUTH0_AUDIENCE env var is required"))?;
+        let resource_server_url = std::env::var("RESOURCE_SERVER_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("RESOURCE_SERVER_URL env var is required"))?;
+
+        Ok(Self {
+            auth0_domain: auth0_domain.trim().to_string(),
+            auth0_audience: auth0_audience.trim().to_string(),
+            resource_server_url: resource_server_url.trim().trim_end_matches('/').to_string(),
+        })
+    }
+
+    /// `https://<domain>/.well-known/jwks.json`
+    pub fn jwks_url(&self) -> String {
+        format!("https://{}/.well-known/jwks.json", self.auth0_domain)
+    }
+
+    /// Auth0 JWT issuer — includes trailing slash per Auth0 spec.
+    pub fn issuer(&self) -> String {
+        format!("https://{}/", self.auth0_domain)
+    }
+
+    /// `https://<domain>` — used as the authorization_server entry in RFC 9728 metadata.
+    pub fn authorization_server(&self) -> String {
+        format!("https://{}", self.auth0_domain)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub projects: Vec<String>,
