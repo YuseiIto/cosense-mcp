@@ -72,7 +72,10 @@ impl CosenseClient {
             ]))
             .send()
             .await?;
-        map_status(project, None, resp)?.json().await.map_err(Into::into)
+        map_status(project, None, resp)?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn get_page(&self, project: &str, title: &str) -> Result<Page, CosenseError> {
@@ -85,7 +88,10 @@ impl CosenseClient {
         let resp = self.request(url).send().await?;
         // Cosense returns 404 for both missing project and missing page on this endpoint;
         // we surface PageNotFound either way since list_pages catches project-level 404s.
-        map_status(project, Some(title), resp)?.json().await.map_err(Into::into)
+        map_status(project, Some(title), resp)?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn search_pages(
@@ -98,12 +104,11 @@ impl CosenseClient {
             self.api_base,
             urlencoding::encode(project),
         );
-        let resp = self
-            .request(url)
-            .query(&[("q", query)])
-            .send()
-            .await?;
-        map_status(project, None, resp)?.json().await.map_err(Into::into)
+        let resp = self.request(url).query(&[("q", query)]).send().await?;
+        map_status(project, None, resp)?
+            .json()
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -116,7 +121,11 @@ fn query_params(pairs: &[(&'static str, Option<String>)]) -> Vec<(&'static str, 
 
 /// Map HTTP errors to typed `CosenseError`. Pass `title` only for endpoints that target a specific
 /// page; in that case 404 is interpreted as a page-not-found rather than project-not-found.
-fn map_status(project: &str, title: Option<&str>, resp: Response) -> Result<Response, CosenseError> {
+fn map_status(
+    project: &str,
+    title: Option<&str>,
+    resp: Response,
+) -> Result<Response, CosenseError> {
     match resp.status() {
         StatusCode::NOT_FOUND => Err(match title {
             Some(t) => CosenseError::PageNotFound {

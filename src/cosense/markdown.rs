@@ -322,7 +322,11 @@ mod tests {
         assert!(out.contains("```rs"), "expected opening ```rs in: {out}");
         assert!(out.contains("fn main()"), "expected body content in: {out}");
         // Two fences expected: one opening (```rs) and one closing (```).
-        assert_eq!(out.matches("```").count(), 2, "expected exactly 2 fences in: {out}");
+        assert_eq!(
+            out.matches("```").count(),
+            2,
+            "expected exactly 2 fences in: {out}"
+        );
     }
 
     #[test]
@@ -331,7 +335,11 @@ mod tests {
         let input = "code:\n some content\n";
         let out = r(input);
         assert!(out.contains("```\n") || out.contains("```"), "got: {out}");
-        assert_eq!(out.matches("```").count(), 2, "expected exactly 2 fences in: {out}");
+        assert_eq!(
+            out.matches("```").count(),
+            2,
+            "expected exactly 2 fences in: {out}"
+        );
     }
 
     #[test]
@@ -344,7 +352,10 @@ mod tests {
         // Cosense table: `table:Name` followed by space-indented, tab-separated rows.
         let input = "table:Stats\n  header1\theader2\n  row1a\trow1b\n";
         let out = r(input);
-        assert!(out.contains("**Stats**"), "expected table name as bold in: {out}");
+        assert!(
+            out.contains("**Stats**"),
+            "expected table name as bold in: {out}"
+        );
         assert!(out.contains("|"), "expected pipe syntax in: {out}");
         assert!(out.contains("---"), "expected separator row in: {out}");
     }
@@ -372,8 +383,14 @@ mod tests {
         // bold + italic + strike — each must survive in the output.
         let out = r("[*-/ all]");
         assert!(out.contains("**"), "missing bold in: {out}");
-        assert!(out.contains("*all*") || out.contains("*all"), "missing italic in: {out}");
-        assert!(out.contains("~~all~~") || out.contains("~~"), "missing strike in: {out}");
+        assert!(
+            out.contains("*all*") || out.contains("*all"),
+            "missing italic in: {out}"
+        );
+        assert!(
+            out.contains("~~all~~") || out.contains("~~"),
+            "missing strike in: {out}"
+        );
     }
 
     #[test]
@@ -385,7 +402,10 @@ mod tests {
     #[test]
     fn coordinate_without_zoom() {
         let out = r("[N35.65,E139.74]");
-        assert!(out.contains("N35.65") && out.contains("E139.74"), "got: {out}");
+        assert!(
+            out.contains("N35.65") && out.contains("E139.74"),
+            "got: {out}"
+        );
         assert!(!out.contains("Z"), "unexpected Z in: {out}");
     }
 
@@ -393,7 +413,10 @@ mod tests {
     fn code_block_with_filename_and_language_preserves_both() {
         let input = "code:main.rs(rust)\n fn main() {}\n";
         let out = r(input);
-        assert!(out.contains("**main.rs**"), "expected filename label in: {out}");
+        assert!(
+            out.contains("**main.rs**"),
+            "expected filename label in: {out}"
+        );
         assert!(out.contains("```rust"), "expected language fence in: {out}");
     }
 
@@ -402,7 +425,10 @@ mod tests {
         let input = "code:rust\n fn main() {}\n";
         let out = r(input);
         assert!(out.contains("```rust"), "expected language fence in: {out}");
-        assert!(!out.contains("**rust**"), "should not emit filename label in: {out}");
+        assert!(
+            !out.contains("**rust**"),
+            "should not emit filename label in: {out}"
+        );
     }
 
     #[test]

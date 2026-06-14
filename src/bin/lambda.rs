@@ -62,8 +62,8 @@ async fn main() -> Result<(), Error> {
         .sid
         .clone()
         .map_or(AuthMethod::None, AuthMethod::SidCookie);
-    let client = CosenseClient::new(config.api_base.clone(), auth_method)
-        .map_err(|e| e.to_string())?;
+    let client =
+        CosenseClient::new(config.api_base.clone(), auth_method).map_err(|e| e.to_string())?;
     let server = CosenseServer::new(client, config);
 
     let auth_state = Arc::new(AuthState::new(&http_config));
