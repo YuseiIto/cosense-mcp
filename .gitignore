@@ -1,1 +1,11 @@
 /target
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+infra/backend.hcl
+crash.log
+crash.*.log

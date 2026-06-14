@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+aws_region    = "ap-northeast-1"
+function_name = "cosense-mcp"
+
+cosense_projects        = ["your-project"]
+cosense_default_project = "" # empty -> first of cosense_projects
+cosense_sid             = "" # connect.sid for private projects; leave empty for public-only
+
+auth0_domain   = "your-tenant.us.auth0.com"
+auth0_audience = "https://cosense-mcp/api"
