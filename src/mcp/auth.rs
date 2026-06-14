@@ -5,18 +5,19 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use axum::extract::Request;
 use axum::{
     body::Body,
     extract::State,
     http::{StatusCode, header},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
-use axum::extract::Request;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 
 use crate::config::HttpConfig;
+use crate::mcp::request_url::public_base_url;
 
 #[derive(Deserialize)]
 struct Jwk {
@@ -60,13 +61,7 @@ impl JwksCache {
     }
 
     async fn do_fetch(&self) -> anyhow::Result<HashMap<String, DecodingKey>> {
-        let resp: JwksResponse = self
-            .client
-            .get(&self.jwks_url)
-            .send()
-            .await?
-            .json()
-            .await?;
+        let resp: JwksResponse = self.client.get(&self.jwks_url).send().await?.json().await?;
         let mut map = HashMap::new();
         for jwk in resp.keys {
             if jwk.kty != "RSA" {
@@ -117,10 +112,6 @@ impl JwksCache {
 pub struct AuthState {
     pub jwks: JwksCache,
     validation: Validation,
-    /// WWW-Authenticate value for requests with no token.
-    no_token_header: String,
-    /// WWW-Authenticate value for requests with an invalid token.
-    invalid_token_header: String,
 }
 
 impl AuthState {
@@ -130,18 +121,20 @@ impl AuthState {
         validation.set_issuer(&[config.issuer()]);
         validation.leeway = 60;
 
-        let base = format!(
-            r#"Bearer realm="cosense-mcp", resource_metadata="{}/.well-known/oauth-protected-resource""#,
-            config.resource_server_url,
-        );
-
         Self {
             jwks: JwksCache::new(config.jwks_url()),
             validation,
-            invalid_token_header: format!(r#"{base}, error="invalid_token""#),
-            no_token_header: base,
         }
     }
+}
+
+/// Base `WWW-Authenticate` value pointing the client at this server's
+/// protected-resource metadata. The metadata URL is derived from the request
+/// origin (see [`public_base_url`]) since the public URL is unknown at deploy time.
+fn www_authenticate(base_url: &str) -> String {
+    format!(
+        r#"Bearer realm="cosense-mcp", resource_metadata="{base_url}/.well-known/oauth-protected-resource""#
+    )
 }
 
 #[derive(Deserialize)]
@@ -157,6 +150,14 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
+    // Derive our public origin so the 401 can point the client at our metadata.
+    // Absent behind a Function URL, so a missing Host is a proxy misconfiguration.
+    let base_url = match public_base_url(request.headers()) {
+        Some(b) => b,
+        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let www_auth = www_authenticate(&base_url);
+
     let token = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -166,11 +167,11 @@ pub async fn auth_middleware(
 
     let token = match token {
         Some(t) => t,
-        None => return build_401(&state.no_token_header),
+        None => return build_401(&www_auth),
     };
 
     if verify_jwt(&state, &token).await.is_err() {
-        return build_401(&state.invalid_token_header);
+        return build_401(&format!(r#"{www_auth}, error="invalid_token""#));
     }
 
     next.run(request).await
@@ -206,7 +207,6 @@ mod tests {
         HttpConfig {
             auth0_domain: "test.auth0.com".to_string(),
             auth0_audience: "https://test.local/api".to_string(),
-            resource_server_url: "https://test.lambda.aws".to_string(),
         }
     }
 
@@ -217,12 +217,16 @@ mod tests {
             .layer(middleware::from_fn_with_state(state, auth_middleware))
     }
 
+    const HOST: &str = "abc.lambda-url.ap-northeast-1.on.aws";
+
     #[tokio::test]
-    async fn no_token_returns_401_without_error_field() {
+    async fn no_token_returns_401_with_derived_resource_metadata() {
         let resp = test_router()
             .oneshot(
                 http::Request::builder()
                     .uri("/mcp")
+                    .header(header::HOST, HOST)
+                    .header("x-forwarded-proto", "https")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -230,10 +234,23 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        let www = resp.headers().get(header::WWW_AUTHENTICATE).unwrap().to_str().unwrap();
+        let www = resp
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(www.contains("Bearer realm="));
-        assert!(www.contains("resource_metadata="));
-        assert!(!www.contains("error="), "no-token 401 should not have error field");
+        assert!(
+            www.contains(&format!(
+                r#"resource_metadata="https://{HOST}/.well-known/oauth-protected-resource""#
+            )),
+            "resource_metadata should be derived from the request Host: {www}"
+        );
+        assert!(
+            !www.contains("error="),
+            "no-token 401 should not have error field"
+        );
     }
 
     #[tokio::test]
@@ -242,6 +259,7 @@ mod tests {
             .oneshot(
                 http::Request::builder()
                     .uri("/mcp")
+                    .header(header::HOST, HOST)
                     .header(header::AUTHORIZATION, "Bearer not.a.jwt")
                     .body(Body::empty())
                     .unwrap(),
@@ -250,8 +268,29 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        let www = resp.headers().get(header::WWW_AUTHENTICATE).unwrap().to_str().unwrap();
+        let www = resp
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(www.contains(r#"error="invalid_token""#));
+        assert!(www.contains(&format!(r#"resource_metadata="https://{HOST}/"#)));
+    }
+
+    #[tokio::test]
+    async fn missing_host_returns_500() {
+        let resp = test_router()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/mcp")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
@@ -267,6 +306,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED, "OPTIONS should bypass auth");
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "OPTIONS should bypass auth"
+        );
     }
 }

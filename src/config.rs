@@ -10,9 +10,6 @@ pub struct HttpConfig {
     pub auth0_domain: String,
     /// Auth0 API identifier used as the JWT `aud` claim, e.g. `https://cosense-mcp.local/api`.
     pub auth0_audience: String,
-    /// Public URL of this Lambda Function URL (no trailing slash), e.g.
-    /// `https://abc.lambda-url.ap-northeast-1.on.aws`.
-    pub resource_server_url: String,
 }
 
 impl HttpConfig {
@@ -25,15 +22,10 @@ impl HttpConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("AUTH0_AUDIENCE env var is required"))?;
-        let resource_server_url = std::env::var("RESOURCE_SERVER_URL")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("RESOURCE_SERVER_URL env var is required"))?;
 
         Ok(Self {
             auth0_domain: auth0_domain.trim().to_string(),
             auth0_audience: auth0_audience.trim().to_string(),
-            resource_server_url: resource_server_url.trim().trim_end_matches('/').to_string(),
         })
     }
 
@@ -238,7 +230,12 @@ mod tests {
 
     #[test]
     fn sid_over_https_to_any_host_allowed() {
-        let r = cfg(Some("x"), None, Some("abc"), Some("https://example.com/api"));
+        let r = cfg(
+            Some("x"),
+            None,
+            Some("abc"),
+            Some("https://example.com/api"),
+        );
         assert!(r.is_ok());
     }
 
