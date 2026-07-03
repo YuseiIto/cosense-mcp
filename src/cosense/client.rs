@@ -7,7 +7,6 @@ use super::types::{Page, PageList, SearchResult};
 pub enum AuthMethod {
     None,
     SidCookie(String),
-    // Phase 2 will add: OAuthBearer(String)
 }
 
 #[derive(Debug, Error)]

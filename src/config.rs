@@ -1,7 +1,43 @@
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
 use anyhow::{Result, bail};
 use url::{Host, Url};
 
 const DEFAULT_API_BASE: &str = "https://scrapbox.io/api";
+const DEFAULT_HTTP_PORT: u16 = 8080;
+// Loopback by default: in the intended deployment only a local cloudflared
+// (or similar reverse proxy) should reach the HTTP listener directly.
+const DEFAULT_HTTP_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Stdio,
+    Http,
+}
+
+impl Transport {
+    pub fn from_env() -> Result<Self> {
+        Self::from_raw(std::env::var("COSENSE_MCP_TRANSPORT").ok().as_deref())
+    }
+
+    pub fn from_raw(raw: Option<&str>) -> Result<Self> {
+        match raw.map(str::trim).filter(|s| !s.is_empty()) {
+            None | Some("stdio") => Ok(Self::Stdio),
+            Some("http") => Ok(Self::Http),
+            Some(other) => {
+                bail!("COSENSE_MCP_TRANSPORT must be 'stdio' (default) or 'http', got '{other}'")
+            }
+        }
+    }
+}
+
+/// Settings for the remote (Streamable HTTP) transport. Authentication is NOT
+/// handled here — put the listener behind an authenticating proxy such as
+/// Cloudflare Access (see README).
+#[derive(Debug, Clone)]
+pub struct HttpConfig {
+    pub addr: SocketAddr,
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -73,6 +109,33 @@ impl Config {
 
     pub fn resolve_project<'a>(&'a self, project: Option<&'a str>) -> &'a str {
         project.unwrap_or(&self.default_project)
+    }
+}
+
+impl HttpConfig {
+    pub fn from_env() -> Result<Self> {
+        Self::from_raw(
+            std::env::var("COSENSE_MCP_BIND").ok().as_deref(),
+            std::env::var("PORT").ok().as_deref(),
+        )
+    }
+
+    pub fn from_raw(bind: Option<&str>, port: Option<&str>) -> Result<Self> {
+        let bind = match bind.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(b) => b
+                .parse::<IpAddr>()
+                .map_err(|_| anyhow::anyhow!("COSENSE_MCP_BIND='{b}' is not a valid IP address"))?,
+            None => DEFAULT_HTTP_BIND,
+        };
+        let port = match port.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(p) => p
+                .parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("PORT='{p}' is not a valid port number"))?,
+            None => DEFAULT_HTTP_PORT,
+        };
+        Ok(Self {
+            addr: SocketAddr::new(bind, port),
+        })
     }
 }
 
@@ -188,7 +251,12 @@ mod tests {
 
     #[test]
     fn sid_over_https_to_any_host_allowed() {
-        let r = cfg(Some("x"), None, Some("abc"), Some("https://example.com/api"));
+        let r = cfg(
+            Some("x"),
+            None,
+            Some("abc"),
+            Some("https://example.com/api"),
+        );
         assert!(r.is_ok());
     }
 
@@ -196,6 +264,34 @@ mod tests {
     fn api_base_trailing_slash_normalized() {
         let c = cfg(Some("x"), None, None, Some("https://example.com/api/")).unwrap();
         assert_eq!(c.api_base, "https://example.com/api");
+    }
+
+    #[test]
+    fn transport_parsing() {
+        assert_eq!(Transport::from_raw(None).unwrap(), Transport::Stdio);
+        assert_eq!(
+            Transport::from_raw(Some("stdio")).unwrap(),
+            Transport::Stdio
+        );
+        assert_eq!(Transport::from_raw(Some("http")).unwrap(), Transport::Http);
+        assert!(Transport::from_raw(Some("sse")).is_err());
+    }
+
+    #[test]
+    fn http_config_defaults_to_loopback_8080() {
+        let c = HttpConfig::from_raw(None, None).unwrap();
+        assert_eq!(c.addr.to_string(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn http_config_bind_and_port_parsing() {
+        let c = HttpConfig::from_raw(Some("0.0.0.0"), Some("3000")).unwrap();
+        assert_eq!(c.addr.to_string(), "0.0.0.0:3000");
+        let c = HttpConfig::from_raw(Some("::1"), None).unwrap();
+        assert_eq!(c.addr.to_string(), "[::1]:8080");
+        assert!(HttpConfig::from_raw(Some("not-an-ip"), None).is_err());
+        assert!(HttpConfig::from_raw(None, Some("notaport")).is_err());
+        assert!(HttpConfig::from_raw(None, Some("99999")).is_err());
     }
 
     #[test]
