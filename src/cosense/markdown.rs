@@ -13,13 +13,20 @@ pub fn render(project: &str, lines: &[String]) -> String {
     // Join all lines and let cosy parse the full document so multi-line blocks
     // (code:, table:) are recognized correctly.
     let input = lines.join("\n");
-    let doc = match cosy::parse(&input, &()) {
-        Ok(d) => d,
-        Err(_) => return input, // fall back to raw text
+    let Ok(doc) = cosy::parse(&input, &()) else {
+        // Returning the raw source is the least-bad fallback, but the caller
+        // hands it to the model under `body_markdown`, so bracket syntax gets
+        // read as Markdown. Silent, this is indistinguishable from success.
+        tracing::warn!(
+            project,
+            bytes = input.len(),
+            "failed to parse Cosense page; returning raw source as Markdown"
+        );
+        return input;
     };
 
     let mut out = String::new();
-    for block in doc.0.iter() {
+    for block in &doc.0 {
         render_block(block, project, &mut out);
         out.push('\n');
     }
@@ -40,7 +47,12 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
                 out.push_str(&"#".repeat(level));
                 out.push(' ');
                 // Inner of the heading decoration is rendered as plain inline.
-                if let Some(Node::Decoration { nodes: inner, .. }) = nodes.first() {
+                // Found by search rather than by index: detect_heading_level
+                // tolerates surrounding whitespace nodes, so the decoration is
+                // not necessarily first.
+                if let Some(Node::Decoration { nodes: inner, .. }) =
+                    nodes.iter().find(|n| matches!(n, Node::Decoration { .. }))
+                {
                     render_nodes(inner, project, out);
                 }
                 return;
@@ -63,7 +75,8 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
                 writeln!(out, "**{f}**").unwrap();
             }
             let trailing = if content.ends_with('\n') { "" } else { "\n" };
-            write!(out, "```{lang}\n{content}{trailing}```").unwrap();
+            let fence = "`".repeat(fence_width(content));
+            write!(out, "{fence}{lang}\n{content}{trailing}{fence}").unwrap();
         }
         BlockContent::Table { name, rows } => {
             render_table(name, rows, project, out);
@@ -80,23 +93,60 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
             };
             write!(out, "```sh\n{p} {command}\n```").unwrap();
         }
-        BlockContent::Custom(_) => {}
+        // Custom blocks carry no payload in this parser configuration, and any
+        // future variant is better skipped than rendered as garbage.
         _ => {}
     }
 }
 
+/// Number of backticks needed to fence `content` without it breaking out.
+///
+/// A wiki that documents Markdown will sooner or later hold a page whose code
+/// block contains a fence of its own; with a fixed three-backtick fence the
+/// inner one closes the outer, and the remaining body escapes as prose.
+/// `CommonMark` resolves this by letting the outer fence be longer than any run
+/// inside.
+fn fence_width(content: &str) -> usize {
+    let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    longest_run.saturating_add(1).max(3)
+}
+
+/// Asterisk count that Cosense pages conventionally use for a top-level
+/// heading, and which therefore maps to `#`.
+const COSENSE_TOP_HEADING_STARS: usize = 3;
+
+/// Markdown heading depth for a Cosense size decoration.
+///
+/// **The two scales run in opposite directions.** More asterisks means larger
+/// text in Cosense, while a larger Markdown number means a smaller heading, so
+/// the count cannot be used as a depth directly. Counts above the conventional
+/// top level clamp to `#` rather than inventing levels above it.
+fn heading_level(stars: usize) -> usize {
+    (COSENSE_TOP_HEADING_STARS + 1)
+        .saturating_sub(stars)
+        .clamp(1, 6)
+}
+
 fn detect_heading_level(nodes: &[Node<()>]) -> Option<usize> {
     // Cosense uses [* x] / [** x] / [*** x] for size-based emphasis used as headings.
-    // Treat a line that consists of a single Decoration whose decos starts with '*' as a heading.
-    if nodes.len() != 1 {
+    // A line is a heading when its only content is one such decoration; trailing
+    // whitespace is common in hand-edited pages and must not demote it to bold.
+    let mut significant = nodes.iter().filter(|n| !is_blank_text(n));
+    let first = significant.next()?;
+    if significant.next().is_some() {
         return None;
     }
-    if let Node::Decoration { decos, .. } = &nodes[0] {
-        if !decos.is_empty() && decos.chars().all(|c| c == '*') {
-            return Some(decos.len().min(6));
-        }
+    if let Node::Decoration { decos, .. } = first
+        && !decos.is_empty()
+        && decos.chars().all(|c| c == '*')
+    {
+        return Some(heading_level(decos.len()));
     }
     None
+}
+
+fn is_blank_text(node: &Node<()>) -> bool {
+    matches!(node, Node::Text(s) if s.trim().is_empty())
 }
 
 fn render_nodes(nodes: &[Node<()>], project: &str, out: &mut String) {
@@ -149,7 +199,8 @@ fn render_node(node: &Node<()>, project: &str, out: &mut String) {
                 None => write!(out, "({lat_dir}{lat_v},{lon_dir}{lon_v})").unwrap(),
             }
         }
-        Node::Custom(_) => {}
+        // Same reasoning as render_block: nothing to emit, and an unknown future
+        // variant is better dropped than guessed at.
         _ => {}
     }
 }
@@ -178,7 +229,6 @@ fn decoration_marks(decos: &str) -> (String, String) {
 
 fn code_block_label(meta: &CodeBlockMeta) -> (Option<&str>, &str) {
     match meta {
-        CodeBlockMeta::None => (None, ""),
         CodeBlockMeta::NameOrLang(s) => {
             // `code:foo` — bare language id; `code:foo.ext` — filename.
             if s.contains('.') {
@@ -188,6 +238,7 @@ fn code_block_label(meta: &CodeBlockMeta) -> (Option<&str>, &str) {
             }
         }
         CodeBlockMeta::Both { filename, language } => (Some(filename.as_str()), language.as_str()),
+        // `None`, plus any variant added later: no filename and no language.
         _ => (None, ""),
     }
 }
@@ -230,7 +281,7 @@ fn render_table(name: &str, rows: &[Vec<Vec<Node<()>>>], project: &str, out: &mu
     if rows.is_empty() {
         return;
     }
-    let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let max_cols = rows.iter().map(std::vec::Vec::len).max().unwrap_or(0);
     if max_cols == 0 {
         return;
     }
@@ -251,10 +302,31 @@ fn write_row(row: &[Vec<Node<()>>], max_cols: usize, project: &str, out: &mut St
     for i in 0..max_cols {
         out.push(' ');
         if let Some(cell) = row.get(i) {
-            render_nodes(cell, project, out);
+            let mut rendered = String::new();
+            render_nodes(cell, project, &mut rendered);
+            out.push_str(&escape_table_cell(&rendered));
         }
         out.push_str(" |");
     }
+}
+
+/// Make a rendered cell safe to place between pipes.
+///
+/// Cosense cells hold ordinary prose, and prose contains `|` — shell pipelines,
+/// `a|b` alternatives, table syntax being documented. Left raw, one of those
+/// adds a column and the row stops lining up with the separator, so a parser
+/// either misaligns the table or drops the overflow. Newlines end the row
+/// outright, so they collapse to spaces.
+fn escape_table_cell(cell: &str) -> String {
+    let mut out = String::with_capacity(cell.len());
+    for ch in cell.chars() {
+        match ch {
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn infer_lang(name_or_lang: &str) -> &str {
@@ -282,9 +354,54 @@ mod tests {
 
     #[test]
     fn headings_use_size_decoration() {
-        assert_eq!(r("[* h1]"), "# h1\n");
-        assert_eq!(r("[** h2]"), "## h2\n");
-        assert_eq!(r("[*** h3]"), "### h3\n");
+        // The scales are inverted: in Cosense more asterisks means larger text,
+        // so the smallest decoration is the deepest Markdown heading.
+        assert_eq!(r("[* smallest]"), "### smallest\n");
+        assert_eq!(r("[** middle]"), "## middle\n");
+        assert_eq!(r("[*** largest]"), "# largest\n");
+    }
+
+    #[test]
+    fn headings_above_the_top_level_clamp_to_h1() {
+        assert_eq!(r("[**** x]"), "# x\n");
+        assert_eq!(r("[********** x]"), "# x\n");
+    }
+
+    #[test]
+    fn heading_survives_trailing_whitespace() {
+        // Hand-edited wiki pages routinely carry one; it must not demote the
+        // line to inline bold.
+        assert_eq!(r("[* h] "), "### h\n");
+    }
+
+    #[test]
+    fn heading_requires_the_decoration_to_be_the_whole_line() {
+        assert!(!r("[* h] and more").starts_with('#'));
+        assert!(!r("before [* h]").starts_with('#'));
+    }
+
+    #[test]
+    fn code_block_fence_grows_past_backticks_in_the_body() {
+        let out = r("code:x.md\n ```\n inner\n ```");
+        assert!(
+            out.contains("````md"),
+            "fence must outgrow the inner run: {out}"
+        );
+        // The body must stay inside the fence rather than escaping as prose.
+        let body_start = out.find("````md").unwrap();
+        assert!(
+            out[body_start..].trim_end().ends_with("````"),
+            "block must close with the same fence: {out}"
+        );
+    }
+
+    #[test]
+    fn table_cells_escape_pipes() {
+        let out = r("table:T\n a|b\tc");
+        assert!(
+            out.contains(r"a\|b"),
+            "an unescaped pipe adds a column: {out}"
+        );
     }
 
     #[test]
@@ -356,7 +473,7 @@ mod tests {
             out.contains("**Stats**"),
             "expected table name as bold in: {out}"
         );
-        assert!(out.contains("|"), "expected pipe syntax in: {out}");
+        assert!(out.contains('|'), "expected pipe syntax in: {out}");
         assert!(out.contains("---"), "expected separator row in: {out}");
     }
 
@@ -406,7 +523,7 @@ mod tests {
             out.contains("N35.65") && out.contains("E139.74"),
             "got: {out}"
         );
-        assert!(!out.contains("Z"), "unexpected Z in: {out}");
+        assert!(!out.contains('Z'), "unexpected Z in: {out}");
     }
 
     #[test]
