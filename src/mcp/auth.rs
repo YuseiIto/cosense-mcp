@@ -22,15 +22,37 @@ use crate::mcp::request_url::public_base_url;
 #[derive(Deserialize)]
 struct Jwk {
     kty: String,
+    /// `sig` or `enc` (RFC 7517 §4.2). Absent means unrestricted.
+    #[serde(rename = "use")]
+    key_use: Option<String>,
+    alg: Option<String>,
     kid: Option<String>,
     n: Option<String>,
     e: Option<String>,
+}
+
+impl Jwk {
+    /// Whether this key may verify a signature for us.
+    ///
+    /// RFC 7517 requires honouring `use` and `alg`. Loading everything RSA-shaped
+    /// would put a key published for encryption into the signature keyset, which
+    /// is precisely the confusion those members exist to prevent.
+    fn is_rs256_signing_key(&self) -> bool {
+        self.kty == "RSA"
+            && self.key_use.as_deref().is_none_or(|u| u == "sig")
+            && self.alg.as_deref().is_none_or(|a| a == "RS256")
+    }
 }
 
 #[derive(Deserialize)]
 struct JwksResponse {
     keys: Vec<Jwk>,
 }
+
+/// How long a failed `kid` lookup suppresses another JWKS fetch. Bounds how
+/// hard an unknown `kid` — including one an attacker can pick freely — can drive
+/// outbound requests to the authorization server.
+const REFETCH_INTERVAL: Duration = Duration::from_mins(1);
 
 pub struct JwksCache {
     keys: ArcSwap<HashMap<String, DecodingKey>>,
@@ -64,49 +86,72 @@ impl JwksCache {
         let resp: JwksResponse = self.client.get(&self.jwks_url).send().await?.json().await?;
         let mut map = HashMap::new();
         for jwk in resp.keys {
-            if jwk.kty != "RSA" {
+            if !jwk.is_rs256_signing_key() {
                 continue;
             }
-            if let (Some(kid), Some(n), Some(e)) = (jwk.kid, jwk.n, jwk.e) {
-                if let Ok(key) = DecodingKey::from_rsa_components(&n, &e) {
-                    map.insert(kid, key);
-                }
+            if let (Some(kid), Some(n), Some(e)) = (jwk.kid, jwk.n, jwk.e)
+                && let Ok(key) = DecodingKey::from_rsa_components(&n, &e)
+            {
+                map.insert(kid, key);
             }
         }
         Ok(map)
     }
 
-    pub async fn get_key(&self, kid: &str) -> Option<DecodingKey> {
+    pub async fn get_key(&self, kid: &str) -> KeyLookup {
         {
             let keys = self.keys.load();
             if let Some(k) = keys.get(kid) {
-                return Some(k.clone());
+                return KeyLookup::Found(k.clone());
             }
         }
 
-        // Rate-limited refetch to handle key rotation (max once per 60 s).
+        // Rate-limited refetch to handle key rotation. The check and the stamp
+        // happen under one lock: reading first and writing after leaves a window
+        // where every concurrent request sees a stale timestamp and they all
+        // refetch, which is the stampede the limit exists to prevent.
         let should_fetch = {
-            let guard = self.last_fetch.lock().unwrap();
-            guard.map_or(true, |t| t.elapsed() > Duration::from_secs(60))
+            let mut guard = self.last_fetch.lock().unwrap();
+            let stale = guard.is_none_or(|t| t.elapsed() > REFETCH_INTERVAL);
+            if stale {
+                *guard = Some(Instant::now());
+            }
+            stale
         };
 
         if should_fetch {
-            // Update timestamp before the fetch so concurrent requests don't pile up.
-            *self.last_fetch.lock().unwrap() = Some(Instant::now());
             match self.do_fetch().await {
                 Ok(new_keys) => {
                     let key = new_keys.get(kid).cloned();
                     self.keys.store(Arc::new(new_keys));
-                    return key;
+                    return key.map_or(KeyLookup::UnknownKid, KeyLookup::Found);
                 }
                 Err(e) => {
                     tracing::warn!("JWKS refetch failed: {e}");
+                    return KeyLookup::Unavailable;
                 }
             }
         }
 
-        None
+        // Inside the refetch window with nothing cached: the previous attempt
+        // failed and has not been retried, so an unknown `kid` and an outage are
+        // indistinguishable from here. Report the outage — the opposite answer
+        // makes a client discard a valid token and loop the whole OAuth flow.
+        if self.keys.load().is_empty() {
+            KeyLookup::Unavailable
+        } else {
+            KeyLookup::UnknownKid
+        }
     }
+}
+
+/// Outcome of resolving a `kid`, keeping "we do not know this key" apart from
+/// "we could not ask". They map to different HTTP statuses and the difference
+/// decides whether a client retries or re-authenticates.
+pub enum KeyLookup {
+    Found(DecodingKey),
+    UnknownKid,
+    Unavailable,
 }
 
 pub struct AuthState {
@@ -117,9 +162,17 @@ pub struct AuthState {
 impl AuthState {
     pub fn new(config: &HttpConfig) -> Self {
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&[config.auth0_audience.clone()]);
+        validation.set_audience(std::slice::from_ref(&config.auth0_audience));
         validation.set_issuer(&[config.issuer()]);
         validation.leeway = 60;
+        // `aud` and `iss` are only compared when the claim is present, and the
+        // default required set is `exp` alone. Without this, a token signed by
+        // the same JWKS but carrying neither claim would pass both checks.
+        validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
+        // Off by default, and adding "nbf" to the required set only asserts the
+        // claim exists — the comparison itself is gated on this flag. Without
+        // it a token dated into the future verifies today.
+        validation.validate_nbf = true;
 
         Self {
             jwks: JwksCache::new(config.jwks_url()),
@@ -137,8 +190,55 @@ fn www_authenticate(base_url: &str) -> String {
     )
 }
 
+/// Permission a token must carry to reach any tool.
+///
+/// This is the authorization boundary. Authentication only establishes that the
+/// authorization server issued the token; it says nothing about whether that
+/// user is allowed here. Anyone able to sign in to the tenant gets a valid
+/// token, and one issued to a user without this permission simply arrives with
+/// an empty `permissions` claim — so the check must be for its presence, never
+/// for the absence of something.
+///
+/// Deliberately not an identity allowlist: who may use this server is expressed
+/// as a role assignment on the authorization server, not baked into the binary.
+pub const REQUIRED_PERMISSION: &str = "read:cosense";
+
 #[derive(Deserialize)]
-struct EmptyClaims {}
+struct Claims {
+    /// Present when the API enforces RBAC policies and issues an `authz` token
+    /// dialect. Absent otherwise, which fails closed.
+    #[serde(default)]
+    permissions: Vec<String>,
+}
+
+fn has_required_permission(permissions: &[String]) -> bool {
+    permissions.iter().any(|p| p == REQUIRED_PERMISSION)
+}
+
+/// Split the credential off an `Authorization` header value.
+///
+/// RFC 7235 §2.1 makes the scheme case-insensitive, so `bearer` is conforming.
+/// Matching `Bearer ` literally turns such a request into "no credentials sent",
+/// and the client answers a bare 401 by running the OAuth flow again to obtain
+/// the identical token.
+fn bearer_credential(value: &str) -> Option<&str> {
+    let (scheme, credential) = value.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("Bearer")
+        .then(|| credential.trim_start())
+}
+
+/// Why a request was rejected. The distinction is not cosmetic: 401 tells the
+/// client to obtain a token, 403 tells it that re-authenticating will not help
+/// until the permission is granted.
+enum AuthFailure {
+    InvalidToken,
+    InsufficientScope,
+    /// The token could not be judged either way. Distinct from `InvalidToken`
+    /// because 401 tells a client its credential is bad, and it responds by
+    /// throwing away a token that may be perfectly good.
+    VerificationUnavailable,
+}
 
 pub async fn auth_middleware(
     State(state): State<Arc<AuthState>>,
@@ -152,9 +252,8 @@ pub async fn auth_middleware(
 
     // Derive our public origin so the 401 can point the client at our metadata.
     // Absent behind a Function URL, so a missing Host is a proxy misconfiguration.
-    let base_url = match public_base_url(request.headers()) {
-        Some(b) => b,
-        None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Some(base_url) = public_base_url(request.headers()) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let www_auth = www_authenticate(&base_url);
 
@@ -162,34 +261,55 @@ pub async fn auth_middleware(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(bearer_credential)
         .map(str::to_owned);
 
-    let token = match token {
-        Some(t) => t,
-        None => return build_401(&www_auth),
+    let Some(token) = token else {
+        return challenge(StatusCode::UNAUTHORIZED, &www_auth);
     };
 
-    if verify_jwt(&state, &token).await.is_err() {
-        return build_401(&format!(r#"{www_auth}, error="invalid_token""#));
+    match verify_jwt(&state, &token).await {
+        Ok(()) => next.run(request).await,
+        Err(AuthFailure::InvalidToken) => challenge(
+            StatusCode::UNAUTHORIZED,
+            &format!(r#"{www_auth}, error="invalid_token""#),
+        ),
+        Err(AuthFailure::InsufficientScope) => challenge(
+            StatusCode::FORBIDDEN,
+            &format!(r#"{www_auth}, error="insufficient_scope", scope="{REQUIRED_PERMISSION}""#),
+        ),
+        // No challenge header: nothing about the credential is in question, and
+        // a `WWW-Authenticate` here would invite the client to re-authenticate.
+        Err(AuthFailure::VerificationUnavailable) => Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header(header::RETRY_AFTER, "5")
+            .body(Body::empty())
+            .unwrap(),
     }
-
-    next.run(request).await
 }
 
-async fn verify_jwt(state: &AuthState, token: &str) -> Result<(), ()> {
-    let header = decode_header(token).map_err(|_| ())?;
-    let kid = header.kid.ok_or(())?;
-    let key = state.jwks.get_key(&kid).await.ok_or(())?;
-    decode::<EmptyClaims>(token, &key, &state.validation).map_err(|e| {
+async fn verify_jwt(state: &AuthState, token: &str) -> Result<(), AuthFailure> {
+    let header = decode_header(token).map_err(|_| AuthFailure::InvalidToken)?;
+    let kid = header.kid.ok_or(AuthFailure::InvalidToken)?;
+    let key = match state.jwks.get_key(&kid).await {
+        KeyLookup::Found(key) => key,
+        KeyLookup::UnknownKid => return Err(AuthFailure::InvalidToken),
+        KeyLookup::Unavailable => return Err(AuthFailure::VerificationUnavailable),
+    };
+    let data = decode::<Claims>(token, &key, &state.validation).map_err(|e| {
         tracing::debug!("JWT verification failed: {e}");
+        AuthFailure::InvalidToken
     })?;
+
+    if !has_required_permission(&data.claims.permissions) {
+        return Err(AuthFailure::InsufficientScope);
+    }
     Ok(())
 }
 
-fn build_401(www_auth: &str) -> Response {
+fn challenge(status: StatusCode, www_auth: &str) -> Response {
     Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
+        .status(status)
         .header(header::WWW_AUTHENTICATE, www_auth)
         .body(Body::empty())
         .unwrap()
@@ -291,6 +411,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn permission_check_requires_an_exact_match() {
+        assert!(has_required_permission(&[REQUIRED_PERMISSION.to_string()]));
+        assert!(has_required_permission(&[
+            "other:thing".to_string(),
+            REQUIRED_PERMISSION.to_string(),
+        ]));
+        // A token issued to a user without the role carries an empty claim
+        // rather than a wrong one — this is the case that must fail closed.
+        assert!(!has_required_permission(&[]));
+        assert!(!has_required_permission(&["read:cosens".to_string()]));
+        assert!(!has_required_permission(
+            &["read:cosense:extra".to_string()]
+        ));
     }
 
     #[tokio::test]
