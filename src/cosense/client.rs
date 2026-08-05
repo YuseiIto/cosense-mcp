@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use thiserror::Error;
 
@@ -7,8 +9,14 @@ use super::types::{Page, PageList, SearchResult};
 pub enum AuthMethod {
     None,
     SidCookie(String),
-    // Phase 2 will add: OAuthBearer(String)
 }
+
+/// Ceiling on a single Cosense API call.
+///
+/// Without one, a connection that is accepted and then never answered blocks
+/// until the whole Lambda invocation expires, which surfaces as an opaque 502
+/// rather than a `CosenseError::Network` the client can act on.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum CosenseError {
@@ -39,6 +47,7 @@ impl CosenseClient {
     pub fn new(api_base: impl Into<String>, auth: AuthMethod) -> reqwest::Result<Self> {
         let http = Client::builder()
             .user_agent(concat!("cosense-mcp/", env!("CARGO_PKG_VERSION")))
+            .timeout(REQUEST_TIMEOUT)
             .build()?;
         Ok(Self {
             http,
