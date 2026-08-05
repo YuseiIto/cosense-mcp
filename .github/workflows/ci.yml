@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No deployment happens here. Applying Terraform needs credentials for a live
+# account, and the plan needs a build artifact this workflow does not produce;
+# both stay a local, human step.
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2.9.1
+      # The lint set lives in Cargo.toml so that a local run and this one agree.
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.1
+      - run: cargo test --all
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - run: terraform -chdir=infra fmt -check -diff
+      # -backend=false reaches provider schema validation without touching the
+      # state bucket, which this workflow has no credentials for.
+      - run: terraform -chdir=infra init -backend=false
+      - run: terraform -chdir=infra validate

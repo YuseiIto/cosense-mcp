@@ -3,6 +3,22 @@ name = "cosense-mcp"
 version = "0.1.0"
 edition = "2024"
 
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# The library target exists only so the two binaries can share code; it is not
+# published and has no external callers. These three lints exist to hold public
+# API documentation to a standard, and applying them here would mean writing
+# `# Errors` and `#[must_use]` on internal helpers whose only caller is two
+# files away.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
 [dependencies]
 anyhow = "1.0.102"
 arc-swap = "1.7"

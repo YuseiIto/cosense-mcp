@@ -3,7 +3,7 @@
 //! Behind a Lambda Function URL the public origin is not known at deploy time
 //! (it depends on the generated URL id), so we derive it per-request instead of
 //! configuring it. Function URLs put the public domain in `Host`.
-//! Ref: https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html
+//! Ref: <https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html>
 //!
 //! The derived value only feeds OAuth discovery hints (RFC 9728 `resource` and
 //! the `WWW-Authenticate` metadata URL), reflected to the requester; it never
