@@ -10,6 +10,14 @@ use lambda_http::{Body as LambdaBody, Error, Request, Response, run, service_fn}
 use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
+/// Ceiling on how much of a response is buffered before handing it to Lambda.
+///
+/// Lambda refuses payloads over 6 MB anyway, so anything larger cannot be
+/// delivered; failing here turns "silently allocate whatever the handler
+/// produced" into a bounded error. A tool that manages to generate more than
+/// this has gone wrong upstream.
+const MAX_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
+
 async fn handle(req: Request, router: axum::Router) -> Result<Response<LambdaBody>, Error> {
     // Convert Lambda request body to axum body.
     let (parts, lambda_body) = req.into_parts();
@@ -25,7 +33,7 @@ async fn handle(req: Request, router: axum::Router) -> Result<Response<LambdaBod
 
     // Convert axum response body back to Lambda body.
     let (resp_parts, resp_body) = axum_resp.into_parts();
-    let resp_bytes = axum::body::to_bytes(resp_body, usize::MAX)
+    let resp_bytes = axum::body::to_bytes(resp_body, MAX_RESPONSE_BYTES)
         .await
         .map_err(|e| format!("{e}"))?;
 
@@ -71,7 +79,7 @@ async fn main() -> Result<(), Error> {
         tracing::warn!("Initial JWKS fetch failed, will retry on first request: {e}");
     }
 
-    let router = build_router(server, http_config, auth_state);
+    let router = build_router(server, &http_config, auth_state);
 
     run(service_fn(move |req: Request| {
         let router = router.clone();

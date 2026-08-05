@@ -14,7 +14,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::config::HttpConfig;
 use crate::mcp::CosenseServer;
-use crate::mcp::auth::{AuthState, auth_middleware};
+use crate::mcp::auth::{AuthState, REQUIRED_PERMISSION, auth_middleware};
 use crate::mcp::request_url::public_base_url;
 
 /// RFC 9728 protected-resource metadata. `resource` is the canonical MCP server
@@ -28,14 +28,20 @@ fn protected_resource_metadata(
     Ok(json!({
         "resource": format!("{base}/mcp"),
         "authorization_servers": [auth_server],
-        "scopes_supported": [],
+        "scopes_supported": [REQUIRED_PERMISSION],
         "bearer_methods_supported": ["header"],
     }))
 }
 
+/// The only browser origin allowed to reach this server, for both CORS and the
+/// transport's own origin check. Kept in one place so the two cannot drift: a
+/// permissive CORS policy paired with a strict origin check (or the reverse)
+/// reads as protection while providing none.
+const ALLOWED_BROWSER_ORIGIN: &str = "https://claude.ai";
+
 pub fn build_router(
     server: CosenseServer,
-    http_config: HttpConfig,
+    http_config: &HttpConfig,
     auth_state: Arc<AuthState>,
 ) -> Router {
     let mcp_service = StreamableHttpService::new(
@@ -44,7 +50,16 @@ pub fn build_router(
         StreamableHttpServerConfig::default()
             .with_stateful_mode(false)
             .with_json_response(true)
-            .disable_allowed_hosts(),
+            // Host validation cannot be used here: it needs the public hostname
+            // at construction time, and behind a Function URL that is only known
+            // once the URL exists. The host arrives in a header we do not
+            // control, so pinning it to a compile-time value would be theatre.
+            .disable_allowed_hosts()
+            // Origin validation can, and covers the attack Host validation was
+            // there for. Requests without an `Origin` header pass — which is
+            // what server-to-server MCP clients send — while a browser coaxed
+            // into calling us from another site is rejected.
+            .with_allowed_origins([ALLOWED_BROWSER_ORIGIN]),
     );
 
     let protected = Router::new()
@@ -52,24 +67,38 @@ pub fn build_router(
         .layer(middleware::from_fn_with_state(auth_state, auth_middleware));
 
     let auth_server = http_config.authorization_server();
+    let metadata = move |headers: HeaderMap| {
+        let auth_server = auth_server.clone();
+        async move { protected_resource_metadata(&headers, &auth_server).map(axum::Json) }
+    };
+
+    // Served at both paths on purpose. RFC 9728 §3.1 inserts the well-known
+    // segment between host and path, so a resource of `<base>/mcp` is discovered
+    // at `/.well-known/oauth-protected-resource/mcp`. Clients that instead
+    // follow the `resource_metadata` pointer in our `WWW-Authenticate` header
+    // arrive at the bare path. Both are in active use.
     let public = Router::new()
         .route(
             "/.well-known/oauth-protected-resource",
-            get(move |headers: HeaderMap| {
-                let auth_server = auth_server.clone();
-                async move { protected_resource_metadata(&headers, &auth_server).map(axum::Json) }
-            }),
+            get(metadata.clone()),
         )
+        .route("/.well-known/oauth-protected-resource/mcp", get(metadata))
         .route("/health", get(|| async { StatusCode::OK }));
 
     let cors = CorsLayer::new()
-        .allow_origin("https://claude.ai".parse::<HeaderValue>().unwrap())
+        .allow_origin(ALLOWED_BROWSER_ORIGIN.parse::<HeaderValue>().unwrap())
         .allow_methods([Method::POST, Method::GET, Method::OPTIONS])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
             HeaderName::from_static("mcp-protocol-version"),
-        ]);
+        ])
+        // `WWW-Authenticate` is not CORS-safelisted, so without this a browser
+        // strips it from our 401 and the client sees a bare rejection with no
+        // `resource_metadata` pointer — the discovery hop the whole auth flow
+        // is built around. Harmless for clients that call us server-side, but
+        // the CORS layer exists precisely for the ones that do not.
+        .expose_headers([header::WWW_AUTHENTICATE]);
 
     Router::new().merge(protected).merge(public).layer(cors)
 }
