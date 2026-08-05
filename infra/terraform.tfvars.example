@@ -2,9 +2,24 @@
 aws_region    = "ap-northeast-1"
 function_name = "cosense-mcp"
 
+# Profile to deploy with, and the account it must land in. The account guard is
+# worth setting: credentials for several accounts are often available at once,
+# and a function created in the wrong one costs nothing and breaks nothing, so
+# nothing tells you about it.
+aws_profile    = ""
+aws_account_id = "" # 12 digits; empty disables the guard
+
+# Bounds cost on a public endpoint. Every request is billed, including the ones
+# rejected with 401, and nothing upstream rate-limits them.
+reserved_concurrency = 5
+
 cosense_projects        = ["your-project"]
 cosense_default_project = "" # empty -> first of cosense_projects
 cosense_sid             = "" # connect.sid for private projects; leave empty for public-only
 
+# auth0_audience must equal the canonical MCP endpoint URI, because that is what
+# the client sends as the RFC 8707 `resource` parameter. Create the Auth0 API
+# with exactly this identifier — it cannot be changed afterwards, so settle the
+# hostname before the first apply.
 auth0_domain   = "your-tenant.us.auth0.com"
-auth0_audience = "https://cosense-mcp/api"
+auth0_audience = "https://mcp.example.com/mcp"

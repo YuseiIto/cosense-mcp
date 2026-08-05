@@ -1,5 +1,24 @@
-# Copy to backend.hcl and fill in. The bucket must already exist.
+# Copy to backend.hcl and fill in. backend.hcl is gitignored.
 #   terraform init -backend-config=backend.hcl
+#
+# The bucket must already exist. Nothing here creates it — a state backend
+# cannot bootstrap itself.
 bucket = "your-tfstate-bucket"
 key    = "cosense-mcp/terraform.tfstate"
 region = "ap-northeast-1"
+
+# Profile used to reach the state bucket. This is often NOT the profile the
+# function is deployed with (see aws_profile in terraform.tfvars): state
+# commonly lives in a separate, longer-lived account from the workload.
+# profile = "your-state-profile"
+
+# Set this if the bucket policy requires SSE-KMS. Omitting it when the policy
+# demands a CMK makes init fail on PutObject, which is preferable to silently
+# writing state under SSE-S3.
+# kms_key_id = "arn:aws:kms:REGION:ACCOUNT:key/KEY-ID"
+
+# Set this when the state bucket is only readable through a dedicated role, so
+# that decrypting state stays a separate grant from deploying the function.
+# assume_role = {
+#   role_arn = "arn:aws:iam::ACCOUNT:role/your-state-role"
+# }

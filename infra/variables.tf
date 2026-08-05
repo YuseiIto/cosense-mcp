@@ -4,6 +4,23 @@ variable "aws_region" {
   default     = "ap-northeast-1"
 }
 
+variable "aws_profile" {
+  description = "AWS CLI profile to deploy with. Empty uses the ambient credentials."
+  type        = string
+  default     = ""
+}
+
+variable "aws_account_id" {
+  description = "Account this must be applied to. Empty disables the guard."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.aws_account_id == "" || can(regex("^[0-9]{12}$", var.aws_account_id))
+    error_message = "aws_account_id must be 12 digits, or empty to disable the guard."
+  }
+}
+
 variable "function_name" {
   description = "Lambda function name; also used to derive the IAM role and log group names."
   type        = string
@@ -20,6 +37,12 @@ variable "timeout" {
   description = "Lambda timeout (seconds). Covers a cold-start JWKS fetch plus the upstream Cosense API call."
   type        = number
   default     = 15
+}
+
+variable "reserved_concurrency" {
+  description = "Reserved concurrent executions. Bounds cost and blast radius on a public endpoint. -1 removes the reservation."
+  type        = number
+  default     = 5
 }
 
 variable "log_retention_days" {

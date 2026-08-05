@@ -60,6 +60,15 @@ resource "aws_lambda_function" "this" {
   memory_size = var.memory_size
   timeout     = var.timeout
 
+  # The function URL is public and unauthenticated at the AWS layer, so every
+  # request is a billed invocation — including the ones the app rejects with 401.
+  # Nothing upstream rate-limits them. This reservation is the only bound: it
+  # caps concurrency, and with it the request rate, since Lambda allows 10x the
+  # reserved concurrency in RPS. Setting it to 0 is also the documented way to
+  # shut a function URL off in an emergency.
+  # Ref: https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html
+  reserved_concurrent_executions = var.reserved_concurrency
+
   environment {
     variables = local.env
   }
