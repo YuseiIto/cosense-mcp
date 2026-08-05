@@ -14,18 +14,31 @@ pub struct HttpConfig {
 
 impl HttpConfig {
     pub fn from_env() -> Result<Self> {
-        let auth0_domain = std::env::var("AUTH0_DOMAIN")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
+        Self::from_raw(
+            std::env::var("AUTH0_DOMAIN").ok().as_deref(),
+            std::env::var("AUTH0_AUDIENCE").ok().as_deref(),
+        )
+    }
+
+    pub fn from_raw(domain: Option<&str>, audience: Option<&str>) -> Result<Self> {
+        let auth0_domain = domain
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("AUTH0_DOMAIN env var is required"))?;
-        let auth0_audience = std::env::var("AUTH0_AUDIENCE")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
+        let auth0_audience = audience
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("AUTH0_AUDIENCE env var is required"))?;
 
+        // AUTH0_AUDIENCE sitting next to it *is* a URL, which makes writing a
+        // scheme here the natural mistake. Unchecked it produces
+        // `https://https://tenant/.well-known/jwks.json`, every request 401s,
+        // and the startup log prints the value back looking perfectly correct.
+        validate_auth0_domain(auth0_domain)?;
+
         Ok(Self {
-            auth0_domain: auth0_domain.trim().to_string(),
-            auth0_audience: auth0_audience.trim().to_string(),
+            auth0_domain: auth0_domain.to_string(),
+            auth0_audience: auth0_audience.to_string(),
         })
     }
 
@@ -39,7 +52,7 @@ impl HttpConfig {
         format!("https://{}/", self.auth0_domain)
     }
 
-    /// `https://<domain>` — used as the authorization_server entry in RFC 9728 metadata.
+    /// `https://<domain>` — used as the `authorization_server` entry in RFC 9728 metadata.
     pub fn authorization_server(&self) -> String {
         format!("https://{}", self.auth0_domain)
     }
@@ -97,7 +110,16 @@ impl Config {
             None => projects[0].clone(),
         };
 
-        let sid = sid.filter(|s| !s.is_empty()).map(str::to_owned);
+        // Trimmed like every other field. A secret pulled from a file or a
+        // parameter store routinely carries a trailing newline, which makes an
+        // invalid header value and fails every call with a network error that
+        // names nothing. A whitespace-only value is worse: untrimmed it looks
+        // set, so it arms the SID-over-plaintext guard while authenticating as
+        // nobody.
+        let sid = sid
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
 
         let api_base = validate_api_base(api_base, sid.is_some())?;
 
@@ -116,6 +138,23 @@ impl Config {
     pub fn resolve_project<'a>(&'a self, project: Option<&'a str>) -> &'a str {
         project.unwrap_or(&self.default_project)
     }
+}
+
+/// A bare `host[:port]`, since it is interpolated into `https://{domain}/...`.
+fn validate_auth0_domain(domain: &str) -> Result<()> {
+    if domain.contains("://") {
+        bail!("AUTH0_DOMAIN must be a bare hostname, not a URL (got '{domain}')");
+    }
+    if domain.contains('/') {
+        bail!("AUTH0_DOMAIN must not contain a path (got '{domain}')");
+    }
+    if !domain
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+    {
+        bail!("AUTH0_DOMAIN contains characters that are not valid in a hostname (got '{domain}')");
+    }
+    Ok(())
 }
 
 fn validate_api_base(raw: Option<&str>, sid_set: bool) -> Result<String> {
@@ -243,6 +282,63 @@ mod tests {
     fn api_base_trailing_slash_normalized() {
         let c = cfg(Some("x"), None, None, Some("https://example.com/api/")).unwrap();
         assert_eq!(c.api_base, "https://example.com/api");
+    }
+
+    #[test]
+    fn sid_is_trimmed_and_blank_is_treated_as_unset() {
+        let c = cfg(Some("x"), None, Some("  abc\n"), None).unwrap();
+        assert_eq!(c.sid.as_deref(), Some("abc"));
+
+        // Must be unset, not Some("   "): a blank value that survives would arm
+        // the SID-over-plaintext guard while carrying no credential.
+        let c = cfg(Some("x"), None, Some("  \n"), None).unwrap();
+        assert_eq!(c.sid, None);
+        assert!(
+            cfg(
+                Some("x"),
+                None,
+                Some(" \t "),
+                Some("http://example.com/api")
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn auth0_domain_must_be_a_bare_host() {
+        for bad in [
+            "https://tenant.us.auth0.com",
+            "tenant.us.auth0.com/",
+            "tenant.us.auth0.com/api",
+            "tenant .us.auth0.com",
+        ] {
+            let r = HttpConfig::from_raw(Some(bad), Some("https://api.example.com/mcp"));
+            assert!(r.is_err(), "expected rejection for {bad:?}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn auth0_config_trims_and_derives_urls() {
+        let c = HttpConfig::from_raw(
+            Some("  tenant.us.auth0.com  "),
+            Some("  https://api.example.com/mcp  "),
+        )
+        .unwrap();
+        assert_eq!(c.auth0_domain, "tenant.us.auth0.com");
+        assert_eq!(c.auth0_audience, "https://api.example.com/mcp");
+        assert_eq!(
+            c.jwks_url(),
+            "https://tenant.us.auth0.com/.well-known/jwks.json"
+        );
+        // Auth0 issuers carry the trailing slash; the audience must not gain one.
+        assert_eq!(c.issuer(), "https://tenant.us.auth0.com/");
+    }
+
+    #[test]
+    fn auth0_config_requires_both_values() {
+        assert!(HttpConfig::from_raw(None, Some("https://a/mcp")).is_err());
+        assert!(HttpConfig::from_raw(Some("t.auth0.com"), None).is_err());
+        assert!(HttpConfig::from_raw(Some("  "), Some("https://a/mcp")).is_err());
     }
 
     #[test]
