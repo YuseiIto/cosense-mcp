@@ -69,9 +69,14 @@ impl HttpConfig {
         format!("https://{}/", self.auth0_domain)
     }
 
-    /// `https://<domain>` — used as the `authorization_server` entry in RFC 9728 metadata.
+    /// The `authorization_servers` entry in RFC 9728 metadata. Identical to
+    /// [`Self::issuer`] on purpose: MCP requires the issuer inside the AS
+    /// metadata a client fetches to be *identical* to the identifier the URL
+    /// was built from, and Auth0 issues with the trailing slash. Publishing a
+    /// slashless form here obliged strictly-conforming clients to reject the
+    /// metadata.
     pub fn authorization_server(&self) -> String {
-        format!("https://{}", self.auth0_domain)
+        self.issuer()
     }
 }
 
@@ -350,6 +355,9 @@ mod tests {
         );
         // Auth0 issuers carry the trailing slash; the audience must not gain one.
         assert_eq!(c.issuer(), "https://tenant.us.auth0.com/");
+        // Must be identical to the issuer, slash included — a strict client
+        // rejects AS metadata whose issuer differs from the URL it built.
+        assert_eq!(c.authorization_server(), c.issuer());
     }
 
     #[test]
