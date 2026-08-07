@@ -434,6 +434,59 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// A real RS256 sign-and-verify round trip.
+    ///
+    /// This is the test that was missing when the crate's crypto provider
+    /// turned out not to exist: jsonwebtoken ships no provider by default and
+    /// panics at the FIRST real signature verification — at runtime, on the
+    /// success path only. Every other test here uses malformed or absent
+    /// tokens, which fail before any cryptography runs, so the suite passed
+    /// while every deployed verification aborted the process.
+    #[test]
+    fn rs256_verification_round_trip_reaches_the_crypto_provider() {
+        use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
+
+        let mut rng = rand::thread_rng();
+        let private = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("keygen");
+        let public = rsa::RsaPublicKey::from(&private);
+
+        let config = test_config();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "iss": config.issuer(),
+            "aud": config.auth0_audience,
+            "sub": "auth0|test-user",
+            "exp": now + 600,
+            "scope": "openid read:cosense",
+        });
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(Algorithm::RS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_rsa_pem(
+                private
+                    .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let key = DecodingKey::from_rsa_pem(
+            public
+                .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        let state = AuthState::new(&config);
+        let data = decode::<Claims>(&token, &key, &state.validation).expect("verify");
+        assert!(scope_grants(data.claims.scope.as_deref()));
+    }
+
     #[test]
     fn scope_check_requires_an_exact_space_delimited_token() {
         assert!(scope_grants(Some(REQUIRED_SCOPE)));
