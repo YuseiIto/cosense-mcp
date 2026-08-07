@@ -183,38 +183,49 @@ impl AuthState {
     }
 }
 
-/// Base `WWW-Authenticate` value pointing the client at this server's
-/// protected-resource metadata. The metadata URL is derived from the request
-/// origin (see [`public_base_url`]) since the public URL is unknown at deploy time.
+/// Base `WWW-Authenticate` value: where our metadata lives, and which scope to
+/// request.
+///
+/// The `scope` hint is not decoration. The MCP scope-selection strategy
+/// consults the challenge's `scope` *before* `scopes_supported`, and a client
+/// that authorizes without requesting any scope receives a token whose `scope`
+/// claim is empty — which this server then rejects. Naming the scope on the
+/// very first 401 steers the client straight to a token that will work.
 fn www_authenticate(base_url: &str) -> String {
     format!(
-        r#"Bearer realm="cosense-mcp", resource_metadata="{base_url}/.well-known/oauth-protected-resource""#
+        r#"Bearer realm="cosense-mcp", scope="{REQUIRED_SCOPE}", resource_metadata="{base_url}/.well-known/oauth-protected-resource""#
     )
 }
 
-/// Permission a token must carry to reach any tool.
+/// Scope a token must carry to reach any tool.
 ///
-/// This is the authorization boundary. Authentication only establishes that the
-/// authorization server issued the token; it says nothing about whether that
-/// user is allowed here. Anyone able to sign in to the tenant gets a valid
-/// token, and one issued to a user without this permission simply arrives with
-/// an empty `permissions` claim — so the check must be for its presence, never
-/// for the absence of something.
+/// This is the authorization boundary, in the OAuth vocabulary the MCP spec
+/// uses throughout. `scope` expresses what the user delegated *to this
+/// client*: the authorization server fills it with the intersection of what
+/// the client requested and what the user's roles grant, so a client that
+/// never asked for this scope cannot exercise it even on behalf of a user who
+/// holds it.
+///
+/// Why not the `permissions` claim (the previous design): it lists the user's
+/// full grants regardless of what the client requested, which stops modelling
+/// delegation the moment a second client exists. A token issued to a user
+/// without the underlying permission simply arrives with this scope missing —
+/// so the check is for presence, never for the absence of something.
 ///
 /// Deliberately not an identity allowlist: who may use this server is expressed
 /// as a role assignment on the authorization server, not baked into the binary.
-pub const REQUIRED_PERMISSION: &str = "read:cosense";
+pub const REQUIRED_SCOPE: &str = "read:cosense";
 
 #[derive(Deserialize)]
 struct Claims {
-    /// Present when the API enforces RBAC policies and issues an `authz` token
-    /// dialect. Absent otherwise, which fails closed.
+    /// Space-delimited per RFC 6749 §3.3. Absent when the client requested no
+    /// scopes, or was granted none of them — both fail closed.
     #[serde(default)]
-    permissions: Vec<String>,
+    scope: Option<String>,
 }
 
-fn has_required_permission(permissions: &[String]) -> bool {
-    permissions.iter().any(|p| p == REQUIRED_PERMISSION)
+fn scope_grants(scope: Option<&str>) -> bool {
+    scope.is_some_and(|s| s.split_ascii_whitespace().any(|s| s == REQUIRED_SCOPE))
 }
 
 /// Split the credential off an `Authorization` header value.
@@ -277,9 +288,11 @@ pub async fn auth_middleware(
             StatusCode::UNAUTHORIZED,
             &format!(r#"{www_auth}, error="invalid_token""#),
         ),
+        // `scope` is already in the base challenge, and RFC 6750 forbids
+        // repeating an auth-param, so only the error is appended here.
         Err(AuthFailure::InsufficientScope) => challenge(
             StatusCode::FORBIDDEN,
-            &format!(r#"{www_auth}, error="insufficient_scope", scope="{REQUIRED_PERMISSION}""#),
+            &format!(r#"{www_auth}, error="insufficient_scope""#),
         ),
         // No challenge header: nothing about the credential is in question, and
         // a `WWW-Authenticate` here would invite the client to re-authenticate.
@@ -304,7 +317,7 @@ async fn verify_jwt(state: &AuthState, token: &str) -> Result<(), AuthFailure> {
         AuthFailure::InvalidToken
     })?;
 
-    if !has_required_permission(&data.claims.permissions) {
+    if !scope_grants(data.claims.scope.as_deref()) {
         return Err(AuthFailure::InsufficientScope);
     }
     Ok(())
@@ -375,6 +388,10 @@ mod tests {
             !www.contains("error="),
             "no-token 401 should not have error field"
         );
+        assert!(
+            www.contains(r#"scope="read:cosense""#),
+            "the first 401 must already name the scope to request: {www}"
+        );
     }
 
     #[tokio::test]
@@ -418,19 +435,16 @@ mod tests {
     }
 
     #[test]
-    fn permission_check_requires_an_exact_match() {
-        assert!(has_required_permission(&[REQUIRED_PERMISSION.to_string()]));
-        assert!(has_required_permission(&[
-            "other:thing".to_string(),
-            REQUIRED_PERMISSION.to_string(),
-        ]));
-        // A token issued to a user without the role carries an empty claim
-        // rather than a wrong one — this is the case that must fail closed.
-        assert!(!has_required_permission(&[]));
-        assert!(!has_required_permission(&["read:cosens".to_string()]));
-        assert!(!has_required_permission(
-            &["read:cosense:extra".to_string()]
-        ));
+    fn scope_check_requires_an_exact_space_delimited_token() {
+        assert!(scope_grants(Some(REQUIRED_SCOPE)));
+        assert!(scope_grants(Some("openid profile read:cosense")));
+        // A token issued without the grant carries no scope (or an empty one)
+        // rather than a wrong one — these are the cases that must fail closed.
+        assert!(!scope_grants(None));
+        assert!(!scope_grants(Some("")));
+        assert!(!scope_grants(Some("read:cosens")));
+        assert!(!scope_grants(Some("read:cosense:extra")));
+        assert!(!scope_grants(Some("xread:cosense")));
     }
 
     #[tokio::test]
