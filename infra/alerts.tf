@@ -142,14 +142,32 @@ resource "aws_cloudwatch_event_target" "discord" {
   arn      = aws_cloudwatch_event_api_destination.discord[0].arn
   role_arn = aws_iam_role.alarm_to_discord[0].arn
 
-  # Values are substituted verbatim; a reason containing a double quote would
-  # break the JSON. CloudWatch's generated reasons don't contain them, and a
-  # malformed one costs a single lost notification, not a stuck rule.
+  # A Discord embed rather than plain content: it renders as a red panel with
+  # the alarm's own description up top and the mechanical details in fields.
+  # `timestamp` is the event's ISO8601 time, which Discord localizes for the
+  # reader. Values are substituted verbatim; a value containing a double quote
+  # would break the JSON. CloudWatch's generated reasons and our descriptions
+  # don't contain them, and a malformed one costs a single lost notification,
+  # not a stuck rule.
   input_transformer {
     input_paths = {
       alarm  = "$.detail.alarmName"
+      desc   = "$.detail.configuration.description"
+      prev   = "$.detail.previousState.value"
       reason = "$.detail.state.reason"
+      time   = "$.time"
     }
-    input_template = "{\"content\": \"🚨 <alarm>: <reason>\"}"
+    input_template = jsonencode({
+      embeds = [{
+        title       = "🚨 <alarm>"
+        description = "**<desc>**"
+        color       = 15548997 # Discord's red
+        fields = [
+          { name = "Transition", value = "<prev> → ALARM", inline = true },
+          { name = "Reason", value = "<reason>" },
+        ]
+        timestamp = "<time>"
+      }]
+    })
   }
 }
