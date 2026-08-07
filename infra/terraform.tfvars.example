@@ -11,11 +11,22 @@ aws_account_id = "" # 12 digits; empty disables the guard
 
 # Bounds cost on a public endpoint. Every request is billed, including the ones
 # rejected with 401, and nothing upstream rate-limits them.
-reserved_concurrency = 5
+#
+# Defaults to no reservation because Lambda refuses one that would leave fewer
+# than 10 unreserved executions, and an account whose limit *is* 10 therefore
+# cannot reserve at all. Check `aws lambda get-account-settings` before setting
+# a value; where reserving is impossible, the account limit is itself the bound.
+reserved_concurrency = -1
 
 cosense_projects        = ["your-project"]
 cosense_default_project = "" # empty -> first of cosense_projects
 cosense_sid             = "" # connect.sid for private projects; leave empty for public-only
+
+# Set this when a proxy or CDN fronts the function. The Host it forwards is that
+# proxy's business and it may rewrite it — a CDN commonly does, to match the TLS
+# name it uses upstream. Leaving it empty makes the server learn its own identity
+# from the caller. Must equal auth0_audience minus the path.
+public_base_url = "https://mcp.example.com"
 
 # auth0_audience must equal the canonical MCP endpoint URI, because that is what
 # the client sends as the RFC 8707 `resource` parameter. Create the Auth0 API

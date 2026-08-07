@@ -40,9 +40,9 @@ variable "timeout" {
 }
 
 variable "reserved_concurrency" {
-  description = "Reserved concurrent executions. Bounds cost and blast radius on a public endpoint. -1 removes the reservation."
+  description = "Reserved concurrent executions. Bounds cost and blast radius on a public endpoint. -1 removes the reservation; see the note in main.tf before setting it."
   type        = number
-  default     = 5
+  default     = -1
 }
 
 variable "log_retention_days" {
@@ -72,6 +72,12 @@ variable "cosense_sid" {
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "public_base_url" {
+  description = "Origin this server publishes as its own identity, e.g. https://mcp.example.com. Empty falls back to the request Host. Set it whenever a proxy sits in front."
+  type        = string
+  default     = ""
 }
 
 variable "auth0_domain" {

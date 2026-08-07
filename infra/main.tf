@@ -14,6 +14,12 @@ locals {
     var.cosense_default_project == "" ? {} : {
       COSENSE_DEFAULT_PROJECT = var.cosense_default_project
     },
+    # Omitted when empty so the binary falls back to deriving the origin from
+    # the request Host, rather than receiving a blank value it would have to
+    # treat as meaningful.
+    var.public_base_url == "" ? {} : {
+      PUBLIC_BASE_URL = var.public_base_url
+    },
   )
 }
 
@@ -61,11 +67,21 @@ resource "aws_lambda_function" "this" {
   timeout     = var.timeout
 
   # The function URL is public and unauthenticated at the AWS layer, so every
-  # request is a billed invocation — including the ones the app rejects with 401.
-  # Nothing upstream rate-limits them. This reservation is the only bound: it
-  # caps concurrency, and with it the request rate, since Lambda allows 10x the
-  # reserved concurrency in RPS. Setting it to 0 is also the documented way to
-  # shut a function URL off in an emergency.
+  # request is a billed invocation — including the ones the app rejects with 401
+  # — and nothing upstream rate-limits them. Concurrency is the bound available:
+  # it caps the request rate too, since Lambda allows 10x the reserved
+  # concurrency in RPS, and 0 is the documented emergency stop for a function URL.
+  #
+  # **Reserving requires headroom that a low account quota may not have.** Lambda
+  # refuses any reservation that would leave fewer than 10 unreserved executions,
+  # so an account whose limit *is* 10 cannot reserve anything above 0 — the
+  # attempt fails at apply time with InvalidParameterValueException.
+  #
+  # Where that is the case the bound has not disappeared: the account-wide limit
+  # is itself the ceiling, and it is a tighter one than most reservations would
+  # be. But it is a property of the account rather than of this configuration, so
+  # **raising that quota silently removes the protection**. Set this variable if
+  # the limit is ever increased, or if another function starts sharing it.
   # Ref: https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html
   reserved_concurrent_executions = var.reserved_concurrency
 

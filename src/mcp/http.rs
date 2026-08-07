@@ -15,7 +15,7 @@ use tower_http::cors::CorsLayer;
 use crate::config::HttpConfig;
 use crate::mcp::CosenseServer;
 use crate::mcp::auth::{AuthState, REQUIRED_PERMISSION, auth_middleware};
-use crate::mcp::request_url::public_base_url;
+use crate::mcp::request_url::PublicOrigin;
 
 /// RFC 9728 protected-resource metadata. `resource` is the canonical MCP server
 /// URI (`<base>/mcp`), derived per-request because the public origin is unknown
@@ -23,8 +23,11 @@ use crate::mcp::request_url::public_base_url;
 fn protected_resource_metadata(
     headers: &HeaderMap,
     auth_server: &str,
+    public_origin: &PublicOrigin,
 ) -> Result<Value, StatusCode> {
-    let base = public_base_url(headers).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let base = public_origin
+        .resolve(headers)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(json!({
         "resource": format!("{base}/mcp"),
         "authorization_servers": [auth_server],
@@ -67,9 +70,13 @@ pub fn build_router(
         .layer(middleware::from_fn_with_state(auth_state, auth_middleware));
 
     let auth_server = http_config.authorization_server();
+    let public_origin = PublicOrigin::configured(http_config.public_base_url.as_deref());
     let metadata = move |headers: HeaderMap| {
         let auth_server = auth_server.clone();
-        async move { protected_resource_metadata(&headers, &auth_server).map(axum::Json) }
+        let public_origin = public_origin.clone();
+        async move {
+            protected_resource_metadata(&headers, &auth_server, &public_origin).map(axum::Json)
+        }
     };
 
     // Served at both paths on purpose. RFC 9728 §3.1 inserts the well-known
@@ -124,7 +131,8 @@ mod tests {
             ("host", "abc.lambda-url.ap-northeast-1.on.aws"),
             ("x-forwarded-proto", "https"),
         ]);
-        let v = protected_resource_metadata(&h, "https://test.auth0.com").unwrap();
+        let v = protected_resource_metadata(&h, "https://test.auth0.com", &PublicOrigin::default())
+            .unwrap();
         assert_eq!(
             v["resource"],
             "https://abc.lambda-url.ap-northeast-1.on.aws/mcp"
@@ -134,9 +142,26 @@ mod tests {
     }
 
     #[test]
+    fn configured_origin_wins_over_the_host_header() {
+        let h = headers(&[("host", "whatever-the-proxy-forwarded.example")]);
+        let v = protected_resource_metadata(
+            &h,
+            "https://test.auth0.com",
+            &PublicOrigin::configured(Some("https://mcp.example.com/")),
+        )
+        .unwrap();
+        // Trailing slash trimmed, and the Host ignored entirely.
+        assert_eq!(v["resource"], "https://mcp.example.com/mcp");
+    }
+
+    #[test]
     fn missing_host_errs_500() {
-        let err =
-            protected_resource_metadata(&HeaderMap::new(), "https://test.auth0.com").unwrap_err();
+        let err = protected_resource_metadata(
+            &HeaderMap::new(),
+            "https://test.auth0.com",
+            &PublicOrigin::default(),
+        )
+        .unwrap_err();
         assert_eq!(err, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

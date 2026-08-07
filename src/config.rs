@@ -10,6 +10,14 @@ pub struct HttpConfig {
     pub auth0_domain: String,
     /// Auth0 API identifier used as the JWT `aud` claim, e.g. `https://cosense-mcp.local/api`.
     pub auth0_audience: String,
+    /// Public origin this server publishes as its own identity, e.g.
+    /// `https://mcp.example.com`. `None` falls back to the request `Host`.
+    ///
+    /// Set this whenever a proxy sits in front: the value it forwards as `Host`
+    /// belongs to that proxy's configuration, and a CDN may rewrite it to match
+    /// the TLS name it uses upstream. It should agree with `auth0_audience`
+    /// minus the path.
+    pub public_base_url: Option<String>,
 }
 
 impl HttpConfig {
@@ -17,10 +25,15 @@ impl HttpConfig {
         Self::from_raw(
             std::env::var("AUTH0_DOMAIN").ok().as_deref(),
             std::env::var("AUTH0_AUDIENCE").ok().as_deref(),
+            std::env::var("PUBLIC_BASE_URL").ok().as_deref(),
         )
     }
 
-    pub fn from_raw(domain: Option<&str>, audience: Option<&str>) -> Result<Self> {
+    pub fn from_raw(
+        domain: Option<&str>,
+        audience: Option<&str>,
+        public_base_url: Option<&str>,
+    ) -> Result<Self> {
         let auth0_domain = domain
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -39,6 +52,10 @@ impl HttpConfig {
         Ok(Self {
             auth0_domain: auth0_domain.to_string(),
             auth0_audience: auth0_audience.to_string(),
+            public_base_url: public_base_url
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim_end_matches('/').to_string()),
         })
     }
 
@@ -312,7 +329,7 @@ mod tests {
             "tenant.us.auth0.com/api",
             "tenant .us.auth0.com",
         ] {
-            let r = HttpConfig::from_raw(Some(bad), Some("https://api.example.com/mcp"));
+            let r = HttpConfig::from_raw(Some(bad), Some("https://api.example.com/mcp"), None);
             assert!(r.is_err(), "expected rejection for {bad:?}: {r:?}");
         }
     }
@@ -322,6 +339,7 @@ mod tests {
         let c = HttpConfig::from_raw(
             Some("  tenant.us.auth0.com  "),
             Some("  https://api.example.com/mcp  "),
+            None,
         )
         .unwrap();
         assert_eq!(c.auth0_domain, "tenant.us.auth0.com");
@@ -336,9 +354,9 @@ mod tests {
 
     #[test]
     fn auth0_config_requires_both_values() {
-        assert!(HttpConfig::from_raw(None, Some("https://a/mcp")).is_err());
-        assert!(HttpConfig::from_raw(Some("t.auth0.com"), None).is_err());
-        assert!(HttpConfig::from_raw(Some("  "), Some("https://a/mcp")).is_err());
+        assert!(HttpConfig::from_raw(None, Some("https://a/mcp"), None).is_err());
+        assert!(HttpConfig::from_raw(Some("t.auth0.com"), None, None).is_err());
+        assert!(HttpConfig::from_raw(Some("  "), Some("https://a/mcp"), None).is_err());
     }
 
     #[test]

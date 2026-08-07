@@ -1,18 +1,44 @@
-//! Reconstructs this server's public base URL from the request `Host` header.
+//! This server's public base URL, which it publishes as its own identity in
+//! OAuth discovery (the RFC 9728 `resource` and the `WWW-Authenticate` metadata
+//! URL).
 //!
-//! Behind a Lambda Function URL the public origin is not known at deploy time
-//! (it depends on the generated URL id), so we derive it per-request instead of
-//! configuring it. Function URLs put the public domain in `Host`.
+//! Prefer configuring it. Deriving it from the request `Host` means the server
+//! learns who it is from the caller, and behind a proxy that value is whatever
+//! the proxy chose to forward — a detail outside this configuration, and one
+//! that a CDN may legitimately rewrite to match the TLS name it uses upstream.
+//! When the public hostname is fixed (and it must be: an authorization server's
+//! API identifier is usually immutable and has to equal this), configuration is
+//! both simpler and truthful.
+//!
+//! The `Host` fallback remains for local runs and for a bare Lambda Function
+//! URL, whose hostname is not known until the URL exists.
 //! Ref: <https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html>
 //!
-//! The derived value only feeds OAuth discovery hints (RFC 9728 `resource` and
-//! the `WWW-Authenticate` metadata URL), reflected to the requester; it never
-//! gates access — JWT `aud`/`iss` are validated against static config. Scheme is
-//! pinned to `https` (never trust `X-Forwarded-Proto`) and the host is rejected
-//! unless it looks like a bare hostname so it can't smuggle a path or whitespace
-//! into the emitted URL.
+//! Either way the scheme is pinned to `https` (never trust `X-Forwarded-Proto`)
+//! and a derived host is rejected unless it looks like a bare hostname, so it
+//! cannot smuggle a path or whitespace into the emitted URL.
 
 use axum::http::{HeaderMap, header};
+
+/// Configured public base URL, if any. Takes precedence over the `Host` header.
+#[derive(Debug, Clone, Default)]
+pub struct PublicOrigin(Option<String>);
+
+impl PublicOrigin {
+    /// `base` is trusted as given; it comes from configuration, not the network.
+    /// A trailing slash is trimmed so paths join cleanly.
+    pub fn configured(base: Option<&str>) -> Self {
+        Self(
+            base.map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim_end_matches('/').to_string()),
+        )
+    }
+
+    pub fn resolve(&self, headers: &HeaderMap) -> Option<String> {
+        self.0.clone().or_else(|| public_base_url(headers))
+    }
+}
 
 /// `https://<host>` from the request `Host` header, or `None` if it is absent or
 /// not a plausible `host[:port]` (alphanumerics, `.`, `-`, `:` only).

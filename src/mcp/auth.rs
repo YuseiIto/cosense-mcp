@@ -17,7 +17,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 
 use crate::config::HttpConfig;
-use crate::mcp::request_url::public_base_url;
+use crate::mcp::request_url::PublicOrigin;
 
 #[derive(Deserialize)]
 struct Jwk {
@@ -157,6 +157,7 @@ pub enum KeyLookup {
 pub struct AuthState {
     pub jwks: JwksCache,
     validation: Validation,
+    public_origin: PublicOrigin,
 }
 
 impl AuthState {
@@ -177,6 +178,7 @@ impl AuthState {
         Self {
             jwks: JwksCache::new(config.jwks_url()),
             validation,
+            public_origin: PublicOrigin::configured(config.public_base_url.as_deref()),
         }
     }
 }
@@ -250,9 +252,10 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    // Derive our public origin so the 401 can point the client at our metadata.
-    // Absent behind a Function URL, so a missing Host is a proxy misconfiguration.
-    let Some(base_url) = public_base_url(request.headers()) else {
+    // Our own origin, so the challenge can point the client at our metadata.
+    // Only unresolvable when nothing is configured *and* the request carries no
+    // usable Host, which is a proxy misconfiguration rather than a client error.
+    let Some(base_url) = state.public_origin.resolve(request.headers()) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let www_auth = www_authenticate(&base_url);
@@ -327,6 +330,7 @@ mod tests {
         HttpConfig {
             auth0_domain: "test.auth0.com".to_string(),
             auth0_audience: "https://test.local/api".to_string(),
+            public_base_url: None,
         }
     }
 
