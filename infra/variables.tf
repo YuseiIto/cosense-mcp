@@ -89,3 +89,10 @@ variable "auth0_audience" {
   description = "Auth0 API identifier validated as the JWT aud claim."
   type        = string
 }
+
+variable "discord_webhook_url" {
+  description = "Discord webhook for gateway alarms. A credential: whoever holds it can post to the channel. Empty disables alerting entirely."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
