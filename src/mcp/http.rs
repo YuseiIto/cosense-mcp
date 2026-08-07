@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Router,
-    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     middleware,
     routing::get,
 };
@@ -10,11 +10,10 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use serde_json::{Value, json};
-use tower_http::cors::CorsLayer;
 
 use crate::config::HttpConfig;
 use crate::mcp::CosenseServer;
-use crate::mcp::auth::{AuthState, REQUIRED_PERMISSION, auth_middleware};
+use crate::mcp::auth::{AuthState, REQUIRED_SCOPE, auth_middleware};
 use crate::mcp::request_url::PublicOrigin;
 
 /// RFC 9728 protected-resource metadata. `resource` is the canonical MCP server
@@ -31,15 +30,17 @@ fn protected_resource_metadata(
     Ok(json!({
         "resource": format!("{base}/mcp"),
         "authorization_servers": [auth_server],
-        "scopes_supported": [REQUIRED_PERMISSION],
+        "scopes_supported": [REQUIRED_SCOPE],
         "bearer_methods_supported": ["header"],
     }))
 }
 
-/// The only browser origin allowed to reach this server, for both CORS and the
-/// transport's own origin check. Kept in one place so the two cannot drift: a
-/// permissive CORS policy paired with a strict origin check (or the reverse)
-/// reads as protection while providing none.
+/// The only browser origin allowed to reach this server, enforced by the
+/// transport's origin validation. CORS itself lives in the gateway in front —
+/// which also ignores any CORS headers a backend emits, so emitting them here
+/// would be dead code that reads as protection. This check is not CORS: it
+/// rejects requests, rather than instructing browsers, and it keeps working
+/// when the binary is deployed without the gateway.
 const ALLOWED_BROWSER_ORIGIN: &str = "https://claude.ai";
 
 pub fn build_router(
@@ -92,26 +93,13 @@ pub fn build_router(
         .route("/.well-known/oauth-protected-resource/mcp", get(metadata))
         .route("/health", get(|| async { StatusCode::OK }));
 
-    let cors = CorsLayer::new()
-        .allow_origin(ALLOWED_BROWSER_ORIGIN.parse::<HeaderValue>().unwrap())
-        .allow_methods([Method::POST, Method::GET, Method::OPTIONS])
-        .allow_headers([
-            header::AUTHORIZATION,
-            header::CONTENT_TYPE,
-            HeaderName::from_static("mcp-protocol-version"),
-        ])
-        // `WWW-Authenticate` is not CORS-safelisted, so without this a browser
-        // strips it from our 401 and the client sees a bare rejection with no
-        // `resource_metadata` pointer — the discovery hop the whole auth flow
-        // is built around. Harmless for clients that call us server-side, but
-        // the CORS layer exists precisely for the ones that do not.
-        .expose_headers([header::WWW_AUTHENTICATE]);
-
-    Router::new().merge(protected).merge(public).layer(cors)
+    Router::new().merge(protected).merge(public)
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderName;
+
     use super::*;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
