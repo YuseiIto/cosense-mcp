@@ -49,6 +49,10 @@ jobs:
           terraform_version: "1.15.8"
           terraform_wrapper: false
       - run: terraform -chdir=infra fmt -check -diff
+      # validate evaluates filebase64sha256() on the Lambda zip, so a clean
+      # checkout fails without an artifact. Any file satisfies it — the hash's
+      # value is irrelevant to validation.
+      - run: mkdir -p target/lambda/lambda && touch target/lambda/lambda/bootstrap.zip
       # -backend=false reaches provider schema validation without touching the
       # state bucket, which this workflow has no credentials for.
       - run: terraform -chdir=infra init -backend=false
