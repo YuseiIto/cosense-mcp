@@ -1,0 +1,13 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "schedule": ["before 9am on monday"],
+  "packageRules": [
+    {
+      "description": "Batch non-major cargo updates; CI covers them and they are reviewed as one",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "cargo (non-major)"
+    }
+  ]
+}
