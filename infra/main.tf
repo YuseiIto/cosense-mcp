@@ -91,18 +91,3 @@ resource "aws_lambda_function" "this" {
 
   depends_on = [aws_iam_role_policy_attachment.logs, aws_cloudwatch_log_group.lambda]
 }
-
-# Public Function URL. Requests (including OPTIONS) are forwarded to the app,
-# which enforces Auth0 JWT on /mcp and emits CORS itself; AWS-side auth is off.
-resource "aws_lambda_function_url" "this" {
-  function_name      = aws_lambda_function.this.function_name
-  authorization_type = "NONE"
-}
-
-resource "aws_lambda_permission" "function_url" {
-  statement_id           = "FunctionURLAllowPublicAccess"
-  action                 = "lambda:InvokeFunctionUrl"
-  function_name          = aws_lambda_function.this.function_name
-  principal              = "*"
-  function_url_auth_type = "NONE"
-}

@@ -41,12 +41,11 @@ resource "aws_apigatewayv2_api" "this" {
   name          = var.function_name
   protocol_type = "HTTP"
 
-  # Kept reachable until the custom-domain path is verified end-to-end; flipped
-  # to true afterwards so the API answers only through the custom domain. Note
-  # this disables the {api-id}.execute-api hostname only — the d-xxxx regional
-  # domain the CNAME points at remains reachable by anyone who sends our Host,
-  # so this narrows the surface rather than forcing the proxy.
-  disable_execute_api_endpoint = false
+  # The custom domain is the only intended door, so the {api-id}.execute-api
+  # hostname is closed. Note the d-xxxx regional domain the CNAME points at
+  # remains reachable by anyone who sends our Host, so this narrows the
+  # surface rather than forcing the proxy.
+  disable_execute_api_endpoint = true
 
   # CORS lives here, not in the application: the gateway answers preflights
   # without invoking Lambda (no OPTIONS route needed) and ignores any CORS
