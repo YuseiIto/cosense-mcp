@@ -57,13 +57,11 @@ impl CosenseServer {
     }
 }
 
-// -------- Tool argument types --------
-
 /// Sort orders the Cosense API accepts.
 ///
-/// An enum rather than a string so the tool schema carries the closed set: an
-/// unsupported value is then rejected before it reaches the API, instead of
-/// coming back as an opaque upstream failure the model cannot act on.
+/// An enum so the tool schema carries the closed set: an unsupported value is
+/// rejected before it reaches the API, rather than coming back as an opaque
+/// upstream failure the model cannot act on.
 /// Ref: <https://scrapbox.io/scrapboxlab/Scrapbox_REST_API%E3%81%AE%E4%B8%80%E8%A6%A7>
 #[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -89,8 +87,8 @@ impl SortOrder {
     }
 }
 
-/// Range the upstream API accepts. Values outside it are an error there, so
-/// they are an error here where the message can say what was wrong.
+/// Range the upstream API accepts. Rejected here, where the message can say
+/// what was wrong.
 const LIMIT_MIN: u32 = 1;
 const LIMIT_MAX: u32 = 1000;
 const LIMIT_DEFAULT: u32 = 50;
@@ -140,8 +138,6 @@ pub struct SearchPagesArgs {
     pub query: String,
 }
 
-// -------- Tool response types --------
-
 #[derive(Debug, Serialize)]
 struct ListPagesResponse {
     project: String,
@@ -180,8 +176,6 @@ struct SearchHitItem {
     title: String,
     snippet: String,
 }
-
-// -------- Tools --------
 
 #[tool_router]
 impl CosenseServer {
@@ -302,9 +296,8 @@ impl ServerHandler for CosenseServer {
 
 fn into_call_result<T: Serialize>(result: Result<T, CosenseError>) -> CallToolResult {
     match result {
-        // A serialization failure must not become an empty success. The model
-        // would read `""` as "the page is empty" or "nothing matched" and say so
-        // confidently, which is worse than an error it can report or retry.
+        // A serialization failure must not become an empty success: the model
+        // would read `""` as "the page is empty" and say so confidently.
         Ok(value) => match serde_json::to_string(&value) {
             Ok(json) => CallToolResult::success(vec![Content::text(json)]),
             Err(err) => {
@@ -328,8 +321,6 @@ mod tests {
         assert_eq!(validate_limit(Some(LIMIT_MIN)).unwrap(), LIMIT_MIN);
         assert_eq!(validate_limit(Some(LIMIT_MAX)).unwrap(), LIMIT_MAX);
 
-        // Rejected here rather than passed upstream, where the failure would
-        // come back as an opaque API error.
         assert!(validate_limit(Some(0)).is_err());
         assert!(validate_limit(Some(LIMIT_MAX + 1)).is_err());
     }

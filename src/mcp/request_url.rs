@@ -2,16 +2,11 @@
 //! OAuth discovery (the RFC 9728 `resource` and the `WWW-Authenticate` metadata
 //! URL).
 //!
-//! Prefer configuring it. Deriving it from the request `Host` means the server
-//! learns who it is from the caller, and behind a proxy that value is whatever
-//! the proxy chose to forward — a detail outside this configuration, and one
-//! that a CDN may legitimately rewrite to match the TLS name it uses upstream.
-//! When the public hostname is fixed (and it must be: an authorization server's
-//! API identifier is usually immutable and has to equal this), configuration is
-//! both simpler and truthful.
-//!
-//! The `Host` fallback remains for local runs and for a bare Lambda Function
-//! URL, whose hostname is not known until the URL exists.
+//! Prefer configuring it: deriving it from `Host` means the server learns who it
+//! is from the caller, and behind a proxy that value is whatever the proxy chose
+//! to forward — which a CDN may legitimately rewrite to the TLS name it uses
+//! upstream. The `Host` fallback remains for local runs and for a bare Lambda
+//! Function URL, whose hostname is not known until the URL exists.
 //! Ref: <https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html>
 //!
 //! Either way the scheme is pinned to `https` (never trust `X-Forwarded-Proto`)
@@ -25,8 +20,8 @@ use axum::http::{HeaderMap, header};
 pub struct PublicOrigin(Option<String>);
 
 impl PublicOrigin {
-    /// `base` is trusted as given; it comes from configuration, not the network.
-    /// A trailing slash is trimmed so paths join cleanly.
+    /// `base` is trusted as given — it comes from configuration, not the
+    /// network. A trailing slash is trimmed so paths join cleanly.
     pub fn configured(base: Option<&str>) -> Self {
         Self(
             base.map(str::trim)
@@ -80,7 +75,7 @@ mod tests {
 
     #[test]
     fn pins_scheme_to_https_ignoring_forwarded_proto() {
-        // Function URLs are always HTTPS; never let a header downgrade the emitted URL.
+        // Function URLs are always HTTPS; no header may downgrade the emitted URL.
         let h = headers(&[("host", "example.com"), ("x-forwarded-proto", "http")]);
         assert_eq!(public_base_url(&h).as_deref(), Some("https://example.com"));
     }

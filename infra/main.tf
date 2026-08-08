@@ -14,9 +14,7 @@ locals {
     var.cosense_default_project == "" ? {} : {
       COSENSE_DEFAULT_PROJECT = var.cosense_default_project
     },
-    # Omitted when empty so the binary falls back to deriving the origin from
-    # the request Host, rather than receiving a blank value it would have to
-    # treat as meaningful.
+    # Likewise, so the binary derives the origin from the request Host.
     var.public_base_url == "" ? {} : {
       PUBLIC_BASE_URL = var.public_base_url
     },
@@ -66,22 +64,17 @@ resource "aws_lambda_function" "this" {
   memory_size = var.memory_size
   timeout     = var.timeout
 
-  # The function URL is public and unauthenticated at the AWS layer, so every
-  # request is a billed invocation — including the ones the app rejects with 401
-  # — and nothing upstream rate-limits them. Concurrency is the bound available:
-  # it caps the request rate too, since Lambda allows 10x the reserved
-  # concurrency in RPS, and 0 is the documented emergency stop for a function URL.
+  # The endpoint is public and unauthenticated at the AWS layer, so every request
+  # is a billed invocation — including the ones the app rejects with 401.
+  # Concurrency bounds cost and request rate alike (Lambda allows 10x the
+  # reservation in RPS), and 0 is the documented emergency stop.
   #
-  # **Reserving requires headroom that a low account quota may not have.** Lambda
-  # refuses any reservation that would leave fewer than 10 unreserved executions,
-  # so an account whose limit *is* 10 cannot reserve anything above 0 — the
-  # attempt fails at apply time with InvalidParameterValueException.
-  #
-  # Where that is the case the bound has not disappeared: the account-wide limit
-  # is itself the ceiling, and it is a tighter one than most reservations would
-  # be. But it is a property of the account rather than of this configuration, so
-  # **raising that quota silently removes the protection**. Set this variable if
-  # the limit is ever increased, or if another function starts sharing it.
+  # Lambda refuses any reservation leaving fewer than 10 unreserved executions,
+  # so an account whose limit *is* 10 cannot reserve above 0 and the apply fails
+  # with InvalidParameterValueException. There the account-wide limit is the
+  # ceiling instead — tighter than most reservations, but a property of the
+  # account, so raising that quota silently removes the protection. Set this
+  # variable if the limit is raised or another function starts sharing it.
   # Ref: https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html
   reserved_concurrent_executions = var.reserved_concurrency
 

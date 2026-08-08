@@ -32,11 +32,8 @@ struct Jwk {
 }
 
 impl Jwk {
-    /// Whether this key may verify a signature for us.
-    ///
-    /// RFC 7517 requires honouring `use` and `alg`. Loading everything RSA-shaped
-    /// would put a key published for encryption into the signature keyset, which
-    /// is precisely the confusion those members exist to prevent.
+    /// RFC 7517 requires honouring `use` and `alg`: accepting everything
+    /// RSA-shaped would admit an encryption key into the signature keyset.
     fn is_rs256_signing_key(&self) -> bool {
         self.kty == "RSA"
             && self.key_use.as_deref().is_none_or(|u| u == "sig")
@@ -49,9 +46,8 @@ struct JwksResponse {
     keys: Vec<Jwk>,
 }
 
-/// How long a failed `kid` lookup suppresses another JWKS fetch. Bounds how
-/// hard an unknown `kid` — including one an attacker can pick freely — can drive
-/// outbound requests to the authorization server.
+/// How long a failed `kid` lookup suppresses another JWKS fetch, bounding how
+/// hard an attacker-chosen `kid` can drive requests to the authorization server.
 const REFETCH_INTERVAL: Duration = Duration::from_mins(1);
 
 pub struct JwksCache {
@@ -106,10 +102,10 @@ impl JwksCache {
             }
         }
 
-        // Rate-limited refetch to handle key rotation. The check and the stamp
-        // happen under one lock: reading first and writing after leaves a window
-        // where every concurrent request sees a stale timestamp and they all
-        // refetch, which is the stampede the limit exists to prevent.
+        // Rate-limited refetch for key rotation. Check and stamp under one lock:
+        // reading first and writing after leaves a window where every concurrent
+        // request sees a stale timestamp and refetches — the stampede this limit
+        // exists to prevent.
         let should_fetch = {
             let mut guard = self.last_fetch.lock().unwrap();
             let stale = guard.is_none_or(|t| t.elapsed() > REFETCH_INTERVAL);
@@ -133,10 +129,9 @@ impl JwksCache {
             }
         }
 
-        // Inside the refetch window with nothing cached: the previous attempt
-        // failed and has not been retried, so an unknown `kid` and an outage are
-        // indistinguishable from here. Report the outage — the opposite answer
-        // makes a client discard a valid token and loop the whole OAuth flow.
+        // Nothing cached inside the refetch window: an unknown `kid` and an
+        // outage are indistinguishable here. Report the outage — the opposite
+        // makes a client discard a valid token and redo the whole OAuth flow.
         if self.keys.load().is_empty() {
             KeyLookup::Unavailable
         } else {
@@ -145,9 +140,8 @@ impl JwksCache {
     }
 }
 
-/// Outcome of resolving a `kid`, keeping "we do not know this key" apart from
-/// "we could not ask". They map to different HTTP statuses and the difference
-/// decides whether a client retries or re-authenticates.
+/// Outcome of resolving a `kid`. "Unknown key" and "could not ask" map to
+/// different statuses, deciding whether a client retries or re-authenticates.
 pub enum KeyLookup {
     Found(DecodingKey),
     UnknownKid,
@@ -166,13 +160,13 @@ impl AuthState {
         validation.set_audience(std::slice::from_ref(&config.auth0_audience));
         validation.set_issuer(&[config.issuer()]);
         validation.leeway = 60;
-        // `aud` and `iss` are only compared when the claim is present, and the
-        // default required set is `exp` alone. Without this, a token signed by
-        // the same JWKS but carrying neither claim would pass both checks.
+        // `aud`/`iss` are only compared when present, and the default required
+        // set is `exp` alone: without this a token signed by the same JWKS but
+        // carrying neither claim passes both checks.
         validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
-        // Off by default, and adding "nbf" to the required set only asserts the
-        // claim exists — the comparison itself is gated on this flag. Without
-        // it a token dated into the future verifies today.
+        // Requiring "nbf" above only asserts the claim exists; the comparison is
+        // gated on this flag, off by default, so without it a future-dated token
+        // verifies today.
         validation.validate_nbf = true;
 
         Self {
@@ -186,34 +180,25 @@ impl AuthState {
 /// Base `WWW-Authenticate` value: where our metadata lives, and which scope to
 /// request.
 ///
-/// The `scope` hint is not decoration. The MCP scope-selection strategy
-/// consults the challenge's `scope` *before* `scopes_supported`, and a client
-/// that authorizes without requesting any scope receives a token whose `scope`
-/// claim is empty — which this server then rejects. Naming the scope on the
-/// very first 401 steers the client straight to a token that will work.
+/// MCP's scope-selection strategy consults the challenge's `scope` *before*
+/// `scopes_supported`, and a client that authorizes without requesting any scope
+/// receives a token with an empty `scope` claim, which this server rejects.
+/// Naming the scope on the first 401 steers it to a token that works.
 fn www_authenticate(base_url: &str) -> String {
     format!(
         r#"Bearer realm="cosense-mcp", scope="{REQUIRED_SCOPE}", resource_metadata="{base_url}/.well-known/oauth-protected-resource""#
     )
 }
 
-/// Scope a token must carry to reach any tool.
+/// Scope a token must carry to reach any tool — the authorization boundary.
 ///
-/// This is the authorization boundary, in the OAuth vocabulary the MCP spec
-/// uses throughout. `scope` expresses what the user delegated *to this
-/// client*: the authorization server fills it with the intersection of what
-/// the client requested and what the user's roles grant, so a client that
-/// never asked for this scope cannot exercise it even on behalf of a user who
-/// holds it.
-///
-/// Why not the `permissions` claim (the previous design): it lists the user's
-/// full grants regardless of what the client requested, which stops modelling
-/// delegation the moment a second client exists. A token issued to a user
-/// without the underlying permission simply arrives with this scope missing —
-/// so the check is for presence, never for the absence of something.
-///
-/// Deliberately not an identity allowlist: who may use this server is expressed
-/// as a role assignment on the authorization server, not baked into the binary.
+/// `scope` expresses what the user delegated *to this client*: the authorization
+/// server fills it with the intersection of what the client requested and what
+/// the user's roles grant. Why not the `permissions` claim (the previous
+/// design): it lists the user's full grants regardless of what the client
+/// requested, so it stops modelling delegation once a second client exists.
+/// Not an identity allowlist either — who may use this server is a role
+/// assignment on the authorization server, not baked into the binary.
 pub const REQUIRED_SCOPE: &str = "read:cosense";
 
 #[derive(Deserialize)]
@@ -230,10 +215,9 @@ fn scope_grants(scope: Option<&str>) -> bool {
 
 /// Split the credential off an `Authorization` header value.
 ///
-/// RFC 7235 §2.1 makes the scheme case-insensitive, so `bearer` is conforming.
-/// Matching `Bearer ` literally turns such a request into "no credentials sent",
-/// and the client answers a bare 401 by running the OAuth flow again to obtain
-/// the identical token.
+/// RFC 7235 §2.1 makes the scheme case-insensitive. Matching `Bearer` literally
+/// turns a conforming `bearer` request into "no credentials sent", and the
+/// client answers the bare 401 by re-running OAuth for the identical token.
 fn bearer_credential(value: &str) -> Option<&str> {
     let (scheme, credential) = value.split_once(' ')?;
     scheme
@@ -241,15 +225,13 @@ fn bearer_credential(value: &str) -> Option<&str> {
         .then(|| credential.trim_start())
 }
 
-/// Why a request was rejected. The distinction is not cosmetic: 401 tells the
-/// client to obtain a token, 403 tells it that re-authenticating will not help
-/// until the permission is granted.
+/// Why a request was rejected: 401 tells the client to obtain a token, 403 that
+/// re-authenticating will not help until the permission is granted.
 enum AuthFailure {
     InvalidToken,
     InsufficientScope,
-    /// The token could not be judged either way. Distinct from `InvalidToken`
-    /// because 401 tells a client its credential is bad, and it responds by
-    /// throwing away a token that may be perfectly good.
+    /// The token could not be judged either way. Distinct from `InvalidToken`,
+    /// whose 401 makes a client throw away a possibly-good token.
     VerificationUnavailable,
 }
 
@@ -264,8 +246,8 @@ pub async fn auth_middleware(
     }
 
     // Our own origin, so the challenge can point the client at our metadata.
-    // Only unresolvable when nothing is configured *and* the request carries no
-    // usable Host, which is a proxy misconfiguration rather than a client error.
+    // Unresolvable only when nothing is configured *and* the request carries no
+    // usable Host — a proxy misconfiguration, not a client error.
     let Some(base_url) = state.public_origin.resolve(request.headers()) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
@@ -294,8 +276,8 @@ pub async fn auth_middleware(
             StatusCode::FORBIDDEN,
             &format!(r#"{www_auth}, error="insufficient_scope""#),
         ),
-        // No challenge header: nothing about the credential is in question, and
-        // a `WWW-Authenticate` here would invite the client to re-authenticate.
+        // No challenge header: the credential is not in question, and one here
+        // would invite the client to re-authenticate.
         Err(AuthFailure::VerificationUnavailable) => Response::builder()
             .status(StatusCode::SERVICE_UNAVAILABLE)
             .header(header::RETRY_AFTER, "5")
@@ -436,12 +418,11 @@ mod tests {
 
     /// A real RS256 sign-and-verify round trip.
     ///
-    /// This is the test that was missing when the crate's crypto provider
-    /// turned out not to exist: jsonwebtoken ships no provider by default and
-    /// panics at the FIRST real signature verification — at runtime, on the
-    /// success path only. Every other test here uses malformed or absent
-    /// tokens, which fail before any cryptography runs, so the suite passed
-    /// while every deployed verification aborted the process.
+    /// jsonwebtoken ships no crypto provider by default and panics at the first
+    /// real signature verification — at runtime, on the success path only. Every
+    /// other test here uses malformed or absent tokens, which fail before any
+    /// cryptography runs, so the suite passed while deployed verification
+    /// aborted the process.
     #[test]
     fn rs256_verification_round_trip_reaches_the_crypto_provider() {
         use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
@@ -492,7 +473,7 @@ mod tests {
         assert!(scope_grants(Some(REQUIRED_SCOPE)));
         assert!(scope_grants(Some("openid profile read:cosense")));
         // A token issued without the grant carries no scope (or an empty one)
-        // rather than a wrong one — these are the cases that must fail closed.
+        // rather than a wrong one, so these are the cases that must fail closed.
         assert!(!scope_grants(None));
         assert!(!scope_grants(Some("")));
         assert!(!scope_grants(Some("read:cosens")));

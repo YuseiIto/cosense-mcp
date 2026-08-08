@@ -14,8 +14,7 @@ output "oauth_protected_resource" {
   value       = "${local.public_base}/.well-known/oauth-protected-resource"
 }
 
-# Copy these into the DNS zone (unproxied) — the zone lives in a different
-# repository, and ACM deletes certificates that stay unvalidated for 72 hours.
+# Copy these into the DNS zone (unproxied) promptly; see gateway.tf.
 output "acm_validation_records" {
   description = "DNS records ACM needs to see before it issues the certificate."
   value = [for o in aws_acm_certificate.public.domain_validation_options : {

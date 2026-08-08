@@ -17,8 +17,8 @@ use crate::mcp::auth::{AuthState, REQUIRED_SCOPE, auth_middleware};
 use crate::mcp::request_url::PublicOrigin;
 
 /// RFC 9728 protected-resource metadata. `resource` is the canonical MCP server
-/// URI (`<base>/mcp`), derived per-request because the public origin is unknown
-/// at deploy time behind a Function URL. Errs 500 if the origin can't be derived.
+/// URI (`<base>/mcp`), derived per-request because behind a Function URL the
+/// public origin is unknown at deploy time.
 fn protected_resource_metadata(
     headers: &HeaderMap,
     auth_server: &str,
@@ -36,11 +36,10 @@ fn protected_resource_metadata(
 }
 
 /// The only browser origin allowed to reach this server, enforced by the
-/// transport's origin validation. CORS itself lives in the gateway in front —
-/// which also ignores any CORS headers a backend emits, so emitting them here
-/// would be dead code that reads as protection. This check is not CORS: it
-/// rejects requests, rather than instructing browsers, and it keeps working
-/// when the binary is deployed without the gateway.
+/// transport's origin validation. Not CORS: it rejects requests rather than
+/// instructing browsers, and it keeps working when the binary runs without the
+/// gateway. CORS itself lives in the gateway, which ignores any CORS header a
+/// backend emits — see `infra/gateway.tf`.
 const ALLOWED_BROWSER_ORIGIN: &str = "https://claude.ai";
 
 pub fn build_router(
@@ -54,15 +53,12 @@ pub fn build_router(
         StreamableHttpServerConfig::default()
             .with_stateful_mode(false)
             .with_json_response(true)
-            // Host validation cannot be used here: it needs the public hostname
-            // at construction time, and behind a Function URL that is only known
-            // once the URL exists. The host arrives in a header we do not
-            // control, so pinning it to a compile-time value would be theatre.
+            // Host validation needs the public hostname at construction time,
+            // which behind a Function URL is only known once the URL exists.
             .disable_allowed_hosts()
-            // Origin validation can, and covers the attack Host validation was
-            // there for. Requests without an `Origin` header pass — which is
-            // what server-to-server MCP clients send — while a browser coaxed
-            // into calling us from another site is rejected.
+            // Origin validation covers the same attack. Requests without an
+            // `Origin` pass — server-to-server MCP clients send none — while a
+            // browser coaxed into calling us from another site is rejected.
             .with_allowed_origins([ALLOWED_BROWSER_ORIGIN]),
     );
 
@@ -80,11 +76,10 @@ pub fn build_router(
         }
     };
 
-    // Served at both paths on purpose. RFC 9728 §3.1 inserts the well-known
-    // segment between host and path, so a resource of `<base>/mcp` is discovered
-    // at `/.well-known/oauth-protected-resource/mcp`. Clients that instead
-    // follow the `resource_metadata` pointer in our `WWW-Authenticate` header
-    // arrive at the bare path. Both are in active use.
+    // Both paths on purpose: RFC 9728 §3.1 inserts the well-known segment
+    // between host and path, so `<base>/mcp` is discovered at
+    // `/.well-known/oauth-protected-resource/mcp`, while clients following the
+    // `resource_metadata` pointer in `WWW-Authenticate` arrive at the bare path.
     let public = Router::new()
         .route(
             "/.well-known/oauth-protected-resource",
@@ -138,7 +133,6 @@ mod tests {
             &PublicOrigin::configured(Some("https://mcp.example.com/")),
         )
         .unwrap();
-        // Trailing slash trimmed, and the Host ignored entirely.
         assert_eq!(v["resource"], "https://mcp.example.com/mcp");
     }
 

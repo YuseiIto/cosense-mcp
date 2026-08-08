@@ -12,11 +12,8 @@ pub struct HttpConfig {
     pub auth0_audience: String,
     /// Public origin this server publishes as its own identity, e.g.
     /// `https://mcp.example.com`. `None` falls back to the request `Host`.
-    ///
-    /// Set this whenever a proxy sits in front: the value it forwards as `Host`
-    /// belongs to that proxy's configuration, and a CDN may rewrite it to match
-    /// the TLS name it uses upstream. It should agree with `auth0_audience`
-    /// minus the path.
+    /// Should agree with `auth0_audience` minus the path. See
+    /// [`crate::mcp::request_url`] for why configuring it beats deriving it.
     pub public_base_url: Option<String>,
 }
 
@@ -43,10 +40,10 @@ impl HttpConfig {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("AUTH0_AUDIENCE env var is required"))?;
 
-        // AUTH0_AUDIENCE sitting next to it *is* a URL, which makes writing a
-        // scheme here the natural mistake. Unchecked it produces
-        // `https://https://tenant/.well-known/jwks.json`, every request 401s,
-        // and the startup log prints the value back looking perfectly correct.
+        // AUTH0_AUDIENCE next to it *is* a URL, so writing a scheme here is the
+        // natural mistake. Unchecked it yields
+        // `https://https://tenant/.well-known/jwks.json` and 401s everything,
+        // while the startup log prints the value back looking correct.
         validate_auth0_domain(auth0_domain)?;
 
         Ok(Self {
@@ -59,7 +56,6 @@ impl HttpConfig {
         })
     }
 
-    /// `https://<domain>/.well-known/jwks.json`
     pub fn jwks_url(&self) -> String {
         format!("https://{}/.well-known/jwks.json", self.auth0_domain)
     }
@@ -70,11 +66,9 @@ impl HttpConfig {
     }
 
     /// The `authorization_servers` entry in RFC 9728 metadata. Identical to
-    /// [`Self::issuer`] on purpose: MCP requires the issuer inside the AS
-    /// metadata a client fetches to be *identical* to the identifier the URL
-    /// was built from, and Auth0 issues with the trailing slash. Publishing a
-    /// slashless form here obliged strictly-conforming clients to reject the
-    /// metadata.
+    /// [`Self::issuer`] on purpose: MCP requires the issuer in the AS metadata a
+    /// client fetches to match the identifier the URL was built from, so a
+    /// slashless form here makes strict clients reject the metadata.
     pub fn authorization_server(&self) -> String {
         self.issuer()
     }
@@ -132,12 +126,11 @@ impl Config {
             None => projects[0].clone(),
         };
 
-        // Trimmed like every other field. A secret pulled from a file or a
-        // parameter store routinely carries a trailing newline, which makes an
-        // invalid header value and fails every call with a network error that
-        // names nothing. A whitespace-only value is worse: untrimmed it looks
-        // set, so it arms the SID-over-plaintext guard while authenticating as
-        // nobody.
+        // A secret pulled from a file or parameter store routinely carries a
+        // trailing newline, which is an invalid header value and fails every
+        // call with a nameless network error. Whitespace-only is worse:
+        // untrimmed it looks set, arming the SID-over-plaintext guard while
+        // authenticating as nobody.
         let sid = sid
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -311,8 +304,7 @@ mod tests {
         let c = cfg(Some("x"), None, Some("  abc\n"), None).unwrap();
         assert_eq!(c.sid.as_deref(), Some("abc"));
 
-        // Must be unset, not Some("   "): a blank value that survives would arm
-        // the SID-over-plaintext guard while carrying no credential.
+        // Must be unset, not Some("   ") — see the guard rationale in from_raw.
         let c = cfg(Some("x"), None, Some("  \n"), None).unwrap();
         assert_eq!(c.sid, None);
         assert!(
@@ -355,8 +347,6 @@ mod tests {
         );
         // Auth0 issuers carry the trailing slash; the audience must not gain one.
         assert_eq!(c.issuer(), "https://tenant.us.auth0.com/");
-        // Must be identical to the issuer, slash included — a strict client
-        // rejects AS metadata whose issuer differs from the URL it built.
         assert_eq!(c.authorization_server(), c.issuer());
     }
 

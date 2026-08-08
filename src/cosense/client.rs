@@ -11,11 +11,9 @@ pub enum AuthMethod {
     SidCookie(String),
 }
 
-/// Ceiling on a single Cosense API call.
-///
-/// Without one, a connection that is accepted and then never answered blocks
-/// until the whole Lambda invocation expires, which surfaces as an opaque 502
-/// rather than a `CosenseError::Network` the client can act on.
+/// Ceiling on a single Cosense API call. Without one, a connection accepted and
+/// never answered blocks until the Lambda invocation expires, surfacing as an
+/// opaque 502 rather than a `CosenseError::Network` the client can act on.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
@@ -95,8 +93,8 @@ impl CosenseClient {
             urlencoding::encode(title),
         );
         let resp = self.request(url).send().await?;
-        // Cosense returns 404 for both missing project and missing page on this endpoint;
-        // we surface PageNotFound either way since list_pages catches project-level 404s.
+        // This endpoint 404s for both a missing project and a missing page;
+        // PageNotFound either way, since list_pages catches project-level 404s.
         map_status(project, Some(title), resp)?
             .json()
             .await
@@ -128,8 +126,8 @@ fn query_params(pairs: &[(&'static str, Option<String>)]) -> Vec<(&'static str, 
         .collect()
 }
 
-/// Map HTTP errors to typed `CosenseError`. Pass `title` only for endpoints that target a specific
-/// page; in that case 404 is interpreted as a page-not-found rather than project-not-found.
+/// Pass `title` only for endpoints targeting a specific page; it makes 404 mean
+/// page-not-found rather than project-not-found.
 fn map_status(
     project: &str,
     title: Option<&str>,

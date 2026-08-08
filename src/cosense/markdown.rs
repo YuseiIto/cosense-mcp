@@ -1,22 +1,19 @@
 //! Convert a Cosense page (line-based text) into Markdown.
 //!
-//! Cosense's API returns pages as a list of `{ text: String }` lines. We join the
-//! lines back into a single document and parse it once with `cosy::parse()`, which
-//! recognises multi-line block constructs (`code:` blocks, `table:`, etc.). The
-//! resulting AST is then walked here to emit Markdown.
+//! The API returns pages as a list of lines. They are rejoined and parsed as one
+//! document so `cosy::parse()` can recognise multi-line blocks (`code:`,
+//! `table:`), and the resulting AST is walked here to emit Markdown.
 
 use std::fmt::Write as _;
 
 use cosy::ast::{Block, BlockContent, CodeBlockMeta, Link, Node, ShellPrompt};
 
 pub fn render(project: &str, lines: &[String]) -> String {
-    // Join all lines and let cosy parse the full document so multi-line blocks
-    // (code:, table:) are recognized correctly.
     let input = lines.join("\n");
     let Ok(doc) = cosy::parse(&input, &()) else {
-        // Returning the raw source is the least-bad fallback, but the caller
-        // hands it to the model under `body_markdown`, so bracket syntax gets
-        // read as Markdown. Silent, this is indistinguishable from success.
+        // Raw source is the least-bad fallback, but the caller hands it to the
+        // model under `body_markdown`, where bracket syntax reads as Markdown.
+        // Silent, this would be indistinguishable from success.
         tracing::warn!(
             project,
             bytes = input.len(),
@@ -30,7 +27,6 @@ pub fn render(project: &str, lines: &[String]) -> String {
         render_block(block, project, &mut out);
         out.push('\n');
     }
-    // Trim trailing whitespace lines.
     while out.ends_with("\n\n") {
         out.pop();
     }
@@ -41,15 +37,12 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
     let indent = block.indent;
     match &block.content {
         BlockContent::Line(nodes) => {
-            // Detect heading: a line whose first node is `Decoration { decos: "*..." }` and there
-            // are no other non-whitespace nodes around it.
             if let Some(level) = detect_heading_level(nodes) {
                 out.push_str(&"#".repeat(level));
                 out.push(' ');
-                // Inner of the heading decoration is rendered as plain inline.
-                // Found by search rather than by index: detect_heading_level
-                // tolerates surrounding whitespace nodes, so the decoration is
-                // not necessarily first.
+                // Found by search, not by index: detect_heading_level tolerates
+                // surrounding whitespace nodes, so the decoration is not
+                // necessarily first.
                 if let Some(Node::Decoration { nodes: inner, .. }) =
                     nodes.iter().find(|n| matches!(n, Node::Decoration { .. }))
                 {
@@ -59,17 +52,15 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
             }
 
             if indent > 0 {
-                // Indented line → bullet list item.
                 out.push_str(&"  ".repeat(indent - 1));
                 out.push_str("- ");
             }
             render_nodes(nodes, project, out);
         }
         BlockContent::CodeBlock { meta, content } => {
-            // Note: when `block.indent > 0` the original block was nested under a list
-            // item. Markdown can express that with 4-space-indented fences but we
-            // currently emit at column 0 — known limitation, accepted because nested
-            // code blocks are rare in practice.
+            // NOTE: a block with `indent > 0` was nested under a list item;
+            // emitting at column 0 loses that. Accepted — nested code blocks are
+            // rare in practice.
             let (filename, lang) = code_block_label(meta);
             if let Some(f) = filename {
                 writeln!(out, "**{f}**").unwrap();
@@ -93,7 +84,7 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
             };
             write!(out, "```sh\n{p} {command}\n```").unwrap();
         }
-        // Custom blocks carry no payload in this parser configuration, and any
+        // Custom blocks carry no payload in this parser configuration, and a
         // future variant is better skipped than rendered as garbage.
         _ => {}
     }
@@ -101,11 +92,10 @@ fn render_block(block: &Block<()>, project: &str, out: &mut String) {
 
 /// Number of backticks needed to fence `content` without it breaking out.
 ///
-/// A wiki that documents Markdown will sooner or later hold a page whose code
-/// block contains a fence of its own; with a fixed three-backtick fence the
-/// inner one closes the outer, and the remaining body escapes as prose.
-/// `CommonMark` resolves this by letting the outer fence be longer than any run
-/// inside.
+/// A page documenting Markdown holds code blocks containing fences; with a fixed
+/// three-backtick fence the inner one closes the outer and the rest of the body
+/// escapes as prose. `CommonMark` fixes this by letting the outer fence be
+/// longer than any run inside.
 fn fence_width(content: &str) -> usize {
     let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     longest_run.saturating_add(1).max(3)
@@ -117,10 +107,9 @@ const COSENSE_TOP_HEADING_STARS: usize = 3;
 
 /// Markdown heading depth for a Cosense size decoration.
 ///
-/// **The two scales run in opposite directions.** More asterisks means larger
-/// text in Cosense, while a larger Markdown number means a smaller heading, so
-/// the count cannot be used as a depth directly. Counts above the conventional
-/// top level clamp to `#` rather than inventing levels above it.
+/// The two scales run in opposite directions — more asterisks means larger text,
+/// a larger Markdown number means a smaller heading — so the count cannot be
+/// used as a depth directly. Counts above the top level clamp to `#`.
 fn heading_level(stars: usize) -> usize {
     (COSENSE_TOP_HEADING_STARS + 1)
         .saturating_sub(stars)
@@ -128,9 +117,9 @@ fn heading_level(stars: usize) -> usize {
 }
 
 fn detect_heading_level(nodes: &[Node<()>]) -> Option<usize> {
-    // Cosense uses [* x] / [** x] / [*** x] for size-based emphasis used as headings.
-    // A line is a heading when its only content is one such decoration; trailing
-    // whitespace is common in hand-edited pages and must not demote it to bold.
+    // A line is a heading when its only content is one `[* x]`-style size
+    // decoration. Trailing whitespace is common in hand-edited pages and must
+    // not demote it to bold.
     let mut significant = nodes.iter().filter(|n| !is_blank_text(n));
     let first = significant.next()?;
     if significant.next().is_some() {
@@ -199,17 +188,15 @@ fn render_node(node: &Node<()>, project: &str, out: &mut String) {
                 None => write!(out, "({lat_dir}{lat_v},{lon_dir}{lon_v})").unwrap(),
             }
         }
-        // Same reasoning as render_block: nothing to emit, and an unknown future
-        // variant is better dropped than guessed at.
+        // Skipped for the same reason as in render_block.
         _ => {}
     }
 }
 
 fn decoration_marks(decos: &str) -> (String, String) {
-    // Cosense decorations: '*' bold/size, '/' italic, '-' strike, '_' underline.
-    // Multiple chars stack (e.g. "*-/" → bold + italic + strike). Other DECO_CHARS
-    // permitted by the parser but lacking a Cosense visual rule are ignored — the
-    // wrapped text content is still emitted, so no information is dropped.
+    // Cosense decorations stack: "*-/" is bold + strike + italic. Chars the
+    // parser permits but Cosense gives no visual rule are ignored; the wrapped
+    // text is still emitted, so no information is dropped.
     let mut open = String::new();
     let mut close = String::new();
     let stack = [
@@ -312,11 +299,9 @@ fn write_row(row: &[Vec<Node<()>>], max_cols: usize, project: &str, out: &mut St
 
 /// Make a rendered cell safe to place between pipes.
 ///
-/// Cosense cells hold ordinary prose, and prose contains `|` — shell pipelines,
-/// `a|b` alternatives, table syntax being documented. Left raw, one of those
-/// adds a column and the row stops lining up with the separator, so a parser
-/// either misaligns the table or drops the overflow. Newlines end the row
-/// outright, so they collapse to spaces.
+/// Cells hold prose, and prose contains `|` (shell pipelines, `a|b`
+/// alternatives). Left raw it adds a column, so the row stops lining up with
+/// the separator. Newlines end the row outright, so they collapse to spaces.
 fn escape_table_cell(cell: &str) -> String {
     let mut out = String::with_capacity(cell.len());
     for ch in cell.chars() {
@@ -330,7 +315,6 @@ fn escape_table_cell(cell: &str) -> String {
 }
 
 fn infer_lang(name_or_lang: &str) -> &str {
-    // If it looks like a filename, try to extract extension; else treat as language id.
     if let Some(idx) = name_or_lang.rfind('.') {
         &name_or_lang[idx + 1..]
     } else {
@@ -354,8 +338,7 @@ mod tests {
 
     #[test]
     fn headings_use_size_decoration() {
-        // The scales are inverted: in Cosense more asterisks means larger text,
-        // so the smallest decoration is the deepest Markdown heading.
+        // Inverted scales: the smallest decoration is the deepest heading.
         assert_eq!(r("[* smallest]"), "### smallest\n");
         assert_eq!(r("[** middle]"), "## middle\n");
         assert_eq!(r("[*** largest]"), "# largest\n");
@@ -369,8 +352,6 @@ mod tests {
 
     #[test]
     fn heading_survives_trailing_whitespace() {
-        // Hand-edited wiki pages routinely carry one; it must not demote the
-        // line to inline bold.
         assert_eq!(r("[* h] "), "### h\n");
     }
 
@@ -387,7 +368,6 @@ mod tests {
             out.contains("````md"),
             "fence must outgrow the inner run: {out}"
         );
-        // The body must stay inside the fence rather than escaping as prose.
         let body_start = out.find("````md").unwrap();
         assert!(
             out[body_start..].trim_end().ends_with("````"),
@@ -438,7 +418,6 @@ mod tests {
         let out = r(input);
         assert!(out.contains("```rs"), "expected opening ```rs in: {out}");
         assert!(out.contains("fn main()"), "expected body content in: {out}");
-        // Two fences expected: one opening (```rs) and one closing (```).
         assert_eq!(
             out.matches("```").count(),
             2,
@@ -448,7 +427,6 @@ mod tests {
 
     #[test]
     fn code_block_without_metadata_emits_blank_lang() {
-        // `code:` with no filename/lang should still produce a fenced block.
         let input = "code:\n some content\n";
         let out = r(input);
         assert!(out.contains("```\n") || out.contains("```"), "got: {out}");
@@ -497,7 +475,6 @@ mod tests {
 
     #[test]
     fn three_decorations_stack() {
-        // bold + italic + strike — each must survive in the output.
         let out = r("[*-/ all]");
         assert!(out.contains("**"), "missing bold in: {out}");
         assert!(
